@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+#####
 
 """
 Grok Exploit Suite - Versão Completa (Não Destrutiva)
